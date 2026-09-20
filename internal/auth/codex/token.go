@@ -52,7 +52,6 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
 	if strings.TrimSpace(authFilePath) == "" {
 		return fmt.Errorf("failed to save token file: path is empty")

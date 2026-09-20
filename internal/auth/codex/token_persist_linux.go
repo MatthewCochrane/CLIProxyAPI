@@ -11,11 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
 var syncTokenParent = unix.Fsync
+
+// ErrTokenCommitDurabilityUncertain means the replacement is visible but its
+// directory entry could not be proven durable across a host crash.
+var ErrTokenCommitDurabilityUncertain = errors.New("Codex token file was replaced but durability is uncertain")
 
 func persistTokenFile(path string, raw []byte) error {
 	path = filepath.Clean(path)
@@ -69,10 +72,10 @@ func persistTokenFile(path string, raw []byte) error {
 	}
 	committed = true
 
-	// Rename is the visible commit point. Failure here changes only the durability
-	// guarantee, so do not return an error that implies the old file survived.
+	// Rename is the visible commit point. Return a distinct error after it so the
+	// caller does not mistake uncertain durability for a pre-commit failure.
 	if errSync := syncTokenParent(parentFD); errSync != nil {
-		log.Warn("Codex token file was replaced, but directory sync failed; verify storage durability")
+		return ErrTokenCommitDurabilityUncertain
 	}
 	return nil
 }

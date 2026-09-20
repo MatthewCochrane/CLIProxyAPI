@@ -323,13 +323,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		_, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			return
 		}
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("Authentication successful! Codex token saved")
 		if bundle.APIKey != "" {
 			fmt.Println("API key obtained and saved")
 		}

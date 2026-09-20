@@ -5,13 +5,12 @@ package codex
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	log "github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 	"golang.org/x/sys/unix"
 )
 
@@ -83,17 +82,19 @@ func TestSaveTokenToFileEmptyPath(t *testing.T) {
 	}
 }
 
-func TestSaveTokenToFileParentSyncFailureIsCommittedSuccess(t *testing.T) {
+func TestSaveTokenToFileParentSyncFailureReportsCommittedUncertainty(t *testing.T) {
 	dir := privateTempDir(t)
 	path := filepath.Join(dir, "codex.json")
-	hook := logtest.NewGlobal()
-	t.Cleanup(hook.Reset)
 	originalSync := syncTokenParent
 	syncTokenParent = func(int) error { return unix.EIO }
 	t.Cleanup(func() { syncTokenParent = originalSync })
 
-	if err := (&CodexTokenStorage{AccessToken: "committed-token"}).SaveTokenToFile(path); err != nil {
-		t.Fatalf("SaveTokenToFile returned a precommit-style error after rename: %v", err)
+	err := (&CodexTokenStorage{AccessToken: "committed-token"}).SaveTokenToFile(path)
+	if !errors.Is(err, ErrTokenCommitDurabilityUncertain) {
+		t.Fatalf("SaveTokenToFile error = %v, want committed durability uncertainty", err)
+	}
+	if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "committed-token") {
+		t.Fatalf("parent sync error exposed credential data or path: %q", err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -101,17 +102,6 @@ func TestSaveTokenToFileParentSyncFailureIsCommittedSuccess(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("committed-token")) {
 		t.Fatalf("committed file content = %q", data)
-	}
-	entry := hook.LastEntry()
-	const warning = "Codex token file was replaced, but directory sync failed; verify storage durability"
-	if entry == nil || entry.Message != warning {
-		t.Fatalf("parent sync warning = %#v", entry)
-	}
-	if strings.Contains(entry.Message, path) || strings.Contains(entry.Message, "committed-token") {
-		t.Fatalf("parent sync warning exposed credential data or path: %q", entry.Message)
-	}
-	if entry.Level != log.WarnLevel {
-		t.Fatalf("parent sync warning level = %s, want warning", entry.Level)
 	}
 }
 
