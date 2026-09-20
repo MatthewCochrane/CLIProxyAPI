@@ -2,8 +2,6 @@ package management
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -305,8 +303,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if claims != nil {
 			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 			if accountID := claims.GetAccountID(); accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
+				hashAccountID = codex.AccountIDHash(accountID)
 			}
 		}
 

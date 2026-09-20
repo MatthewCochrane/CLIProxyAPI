@@ -65,6 +65,9 @@ func TestSaveTokenRecord_PostPersistHookReceivesCanonicalClaudeOAuth(t *testing.
 
 func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	authDir := t.TempDir()
+	if errChmod := os.Chmod(authDir, 0o700); errChmod != nil {
+		t.Fatalf("chmod auth directory: %v", errChmod)
+	}
 	fileName := "codex-user@example.com.json"
 	filePath := filepath.Join(authDir, fileName)
 

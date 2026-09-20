@@ -6,11 +6,9 @@ package codex
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
@@ -45,8 +43,7 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 }
 
 // SaveTokenToFile serializes the Codex token storage to a JSON file.
-// This method creates the necessary directory structure and writes the token
-// data in JSON format to the specified file path for persistent storage.
+// The destination's parent directory must already exist.
 // It merges any injected metadata into the top-level JSON object.
 //
 // Parameters:
@@ -57,8 +54,8 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
+	if strings.TrimSpace(authFilePath) == "" {
+		return fmt.Errorf("failed to save token file: path is empty")
 	}
 
 	// Merge metadata using helper
@@ -67,18 +64,11 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
+	raw, errMarshal := json.MarshalIndent(data, "", "  ")
+	if errMarshal != nil {
+		return fmt.Errorf("failed to encode token file: %w", errMarshal)
 	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("codex token storage: close token file error: %v", errClose)
-		}
-	}()
+	raw = append(raw, '\n')
 
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
+	return persistTokenFile(authFilePath, raw)
 }

@@ -1,6 +1,10 @@
 package codex
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestCredentialFileName(t *testing.T) {
 	tests := []struct {
@@ -82,6 +86,46 @@ func TestCredentialFileName(t *testing.T) {
 			got := CredentialFileName(tt.email, tt.planType, tt.hashAccountID, tt.includeProviderPrefix)
 			if got != tt.want {
 				t.Fatalf("CredentialFileName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAccountIDHashIsBoundedAndCollisionResistant(t *testing.T) {
+	first := AccountIDHash("account-a")
+	second := AccountIDHash("account-b")
+	if len(first) != 32 || len(second) != 32 {
+		t.Fatalf("hash lengths = %d, %d; want 32", len(first), len(second))
+	}
+	if first == second {
+		t.Fatal("distinct account IDs produced the same hash")
+	}
+	if got := AccountIDHash("  account-a  "); got != first {
+		t.Fatalf("trimmed hash = %q, want %q", got, first)
+	}
+	if got := AccountIDHash("   "); got != "" {
+		t.Fatalf("blank account hash = %q, want empty", got)
+	}
+}
+
+func TestCredentialFileNameCannotEscapeAuthDirectory(t *testing.T) {
+	tests := []struct {
+		name          string
+		email         string
+		hashAccountID string
+	}{
+		{name: "email traversal", email: "../../outside"},
+		{name: "email absolute path", email: "/tmp/outside"},
+		{name: "email separator", email: "user/name@example.com"},
+		{name: "hash traversal", email: "user@example.com", hashAccountID: "../../outside"},
+		{name: "control characters", email: "user\x00\n@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CredentialFileName(tt.email, "plus", tt.hashAccountID, true)
+			if filepath.Base(got) != got || strings.ContainsAny(got, `/\\`) || got == "." || got == ".." {
+				t.Fatalf("credential filename escaped its parent: %q", got)
 			}
 		})
 	}
