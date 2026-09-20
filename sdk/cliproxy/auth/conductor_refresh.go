@@ -22,10 +22,12 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
+	refreshCheckInterval   = 5 * time.Second
+	refreshMaxConcurrency  = 16
+	refreshPendingBackoff  = time.Minute
+	refreshFailureBackoff  = 5 * time.Minute
+	refreshPersistAttempts = 3
+	refreshPersistBackoff  = 50 * time.Millisecond
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -482,13 +484,19 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
 		return auth, false
 	}
-	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
+	log.Debugf("unauthorized response for %s, refreshing credentials before fallback", auth.Provider)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
-	if errRefresh != nil || refreshed == nil {
-		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+	if refreshed != nil {
+		if errRefresh != nil {
+			log.Warnf("credential refresh for %s completed with a persistence warning", auth.Provider)
+		}
+		return refreshed, true
+	}
+	if errRefresh != nil {
+		log.Debugf("credential refresh before fallback failed for %s: %v", auth.Provider, errRefresh)
 		return auth, false
 	}
-	return refreshed, true
+	return auth, false
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
@@ -542,10 +550,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	if err != nil && errors.Is(err, context.Canceled) {
-		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		log.Debugf("refresh canceled for %s", auth.Provider)
 		return nil, err
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+	log.Debugf("refreshed %s: %v", auth.Provider, err)
 	now := time.Now()
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
@@ -580,7 +588,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 				current.NextRefreshAfter = nextRetry
 
 				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+					log.Warnf("credential refresh failed for %s: %s; retaining active credential as access token is unexpired", current.Provider, safeErrorDiagnosticForLog(err))
 				}
 			}
 			m.auths[id] = current
@@ -616,10 +624,12 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.UpdateRefreshedAuth(ctx, base, updated)
+	saved, errUpdate := m.persistRefreshedAuth(ctx, base, updated)
 	if errUpdate != nil {
-		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
-		return nil, errUpdate
+		log.Debugf("persist refreshed auth %s failed: %v", auth.Provider, errUpdate)
+		if saved == nil {
+			return nil, errUpdate
+		}
 	}
 	if saved == nil {
 		return nil, fmt.Errorf("auth %s not found", id)
@@ -636,7 +646,33 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if targetAuth != nil && len(projections) > 0 {
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
-	return saved.Clone(), nil
+	return saved.Clone(), errUpdate
+}
+
+// persistRefreshedAuth retries only local persistence of the already-rotated
+// credential. It never invokes the provider refresh endpoint again.
+func (m *Manager) persistRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	var lastErr error
+	for attempt := 0; attempt < refreshPersistAttempts; attempt++ {
+		saved, err := m.UpdateRefreshedAuth(ctx, base, updated)
+		if err == nil || saved != nil {
+			return saved, err
+		}
+		lastErr = err
+		if attempt+1 == refreshPersistAttempts {
+			break
+		}
+		timer := time.NewTimer(refreshPersistBackoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
 }
 
 // ForceRefreshAuth triggers an immediate synchronous refresh for the credential.

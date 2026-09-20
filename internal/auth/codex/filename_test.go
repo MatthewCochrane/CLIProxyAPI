@@ -130,3 +130,13 @@ func TestCredentialFileNameCannotEscapeAuthDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialFileNameBoundsLongPlanAndCombinedComponents(t *testing.T) {
+	got := CredentialFileName(strings.Repeat("a", 300)+"@example.com", strings.Repeat("Enterprise Plan ", 40), strings.Repeat("b", 300), true)
+	if len(got) > 240 {
+		t.Fatalf("credential filename length = %d, want at most 240", len(got))
+	}
+	if filepath.Base(got) != got || !strings.HasSuffix(got, ".json") {
+		t.Fatalf("credential filename is invalid: %q", got)
+	}
+}

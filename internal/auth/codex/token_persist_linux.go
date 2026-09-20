@@ -16,9 +16,19 @@ import (
 
 var syncTokenParent = unix.Fsync
 
+type tokenCommitDurabilityUncertainError struct{}
+
+func (tokenCommitDurabilityUncertainError) Error() string {
+	return "Codex token file was replaced but durability is uncertain"
+}
+
+// CommitVisible reports that the new credential is already visible at the
+// destination even though its directory entry was not proven crash-durable.
+func (tokenCommitDurabilityUncertainError) CommitVisible() bool { return true }
+
 // ErrTokenCommitDurabilityUncertain means the replacement is visible but its
 // directory entry could not be proven durable across a host crash.
-var ErrTokenCommitDurabilityUncertain = errors.New("Codex token file was replaced but durability is uncertain")
+var ErrTokenCommitDurabilityUncertain = tokenCommitDurabilityUncertainError{}
 
 func persistTokenFile(path string, raw []byte) error {
 	path = filepath.Clean(path)

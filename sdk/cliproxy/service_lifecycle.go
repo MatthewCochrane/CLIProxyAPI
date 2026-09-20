@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -359,19 +360,42 @@ func (s *Service) Shutdown(ctx context.Context) error {
 }
 
 func (s *Service) ensureAuthDir() error {
-	info, err := os.Stat(s.cfg.AuthDir)
+	info, err := os.Lstat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
+			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
 			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
-			return nil
+			info, err = os.Lstat(s.cfg.AuthDir)
+			if err != nil {
+				return fmt.Errorf("cliproxy: failed to inspect created auth directory: %w", err)
+			}
+		} else {
+			return fmt.Errorf("cliproxy: error checking auth directory %s: %w", s.cfg.AuthDir, err)
 		}
-		return fmt.Errorf("cliproxy: error checking auth directory %s: %w", s.cfg.AuthDir, err)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("cliproxy: auth directory must not grant group or other permissions: %s", s.cfg.AuthDir)
+	}
+	if !authDirOwnedByCurrentUser(info) {
+		return fmt.Errorf("cliproxy: auth directory must be owned by the current user")
+	}
+	for path := filepath.Clean(s.cfg.AuthDir); ; path = filepath.Dir(path) {
+		entry, errEntry := os.Lstat(path)
+		if errEntry != nil {
+			return fmt.Errorf("cliproxy: failed to inspect auth directory ancestry: %w", errEntry)
+		}
+		if entry.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("cliproxy: auth directory ancestry must not contain symlinks")
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			break
+		}
 	}
 	return nil
 }

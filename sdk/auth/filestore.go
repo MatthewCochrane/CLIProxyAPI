@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -16,6 +17,13 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+// SaveErrorCommitted reports whether a failed Save nevertheless made the new
+// credential authoritative in this file-backed store.
+func (s *FileTokenStore) SaveErrorCommitted(err error) bool {
+	var committed interface{ CommitVisible() bool }
+	return errors.As(err, &committed) && committed.CommitVisible()
+}
 
 // PluginAuthParser parses auth JSON owned by plugin providers.
 type PluginAuthParser interface {

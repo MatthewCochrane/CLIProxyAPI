@@ -32,16 +32,23 @@ func CredentialFileName(email, planType, hashAccountID string, includeProviderPr
 		prefix = "codex"
 	}
 
+	var filename string
 	if hashAccountID != "" {
 		if plan == "" {
-			return fmt.Sprintf("%s-%s-%s.json", prefix, hashAccountID, email)
+			filename = fmt.Sprintf("%s-%s-%s.json", prefix, hashAccountID, email)
+		} else {
+			filename = fmt.Sprintf("%s-%s-%s-%s.json", prefix, hashAccountID, email, plan)
 		}
-		return fmt.Sprintf("%s-%s-%s-%s.json", prefix, hashAccountID, email, plan)
+	} else if plan == "" {
+		filename = fmt.Sprintf("%s-%s.json", prefix, email)
+	} else {
+		filename = fmt.Sprintf("%s-%s-%s.json", prefix, email, plan)
 	}
-	if plan == "" {
-		return fmt.Sprintf("%s-%s.json", prefix, email)
+	if len(filename) <= 240 {
+		return filename
 	}
-	return fmt.Sprintf("%s-%s-%s.json", prefix, email, plan)
+	digest := sha256.Sum256([]byte(filename))
+	return fmt.Sprintf("%s-account-%x.json", prefix, digest[:16])
 }
 
 func safeCredentialFilenameComponent(value, fallback string) string {
@@ -91,5 +98,5 @@ func normalizePlanTypeForFilename(planType string) string {
 	for i, part := range parts {
 		parts[i] = strings.ToLower(strings.TrimSpace(part))
 	}
-	return strings.Join(parts, "-")
+	return safeCredentialFilenameComponent(strings.Join(parts, "-"), "plan")
 }
