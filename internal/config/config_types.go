@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -181,6 +182,9 @@ type AntigravityConnectionPoolConfig struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	// HTTPTimeouts bounds each phase of Codex HTTP Responses requests. Values must be
+	// positive Go duration strings. Empty values use conservative defaults.
+	HTTPTimeouts CodexHTTPTimeoutConfig `yaml:"http-timeouts,omitempty" json:"http-timeouts,omitempty"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
@@ -220,6 +224,79 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+}
+
+const (
+	DefaultCodexHTTPConnectTimeout        = 30 * time.Second
+	DefaultCodexHTTPResponseHeaderTimeout = 60 * time.Second
+	DefaultCodexHTTPStreamIdleTimeout     = 5 * time.Minute
+	DefaultCodexHTTPTotalTimeout          = 60 * time.Minute
+)
+
+// CodexHTTPTimeoutConfig configures independent bounds for Codex HTTP Responses requests.
+type CodexHTTPTimeoutConfig struct {
+	Connect        string `yaml:"connect,omitempty" json:"connect,omitempty"`
+	ResponseHeader string `yaml:"response-header,omitempty" json:"response-header,omitempty"`
+	StreamIdle     string `yaml:"stream-idle,omitempty" json:"stream-idle,omitempty"`
+	Total          string `yaml:"total,omitempty" json:"total,omitempty"`
+}
+
+var (
+	ErrCodexHTTPConnectTimeoutInvalid        = errors.New("codex.http-timeouts.connect must be a positive duration")
+	ErrCodexHTTPResponseHeaderTimeoutInvalid = errors.New("codex.http-timeouts.response-header must be a positive duration")
+	ErrCodexHTTPStreamIdleTimeoutInvalid     = errors.New("codex.http-timeouts.stream-idle must be a positive duration")
+	ErrCodexHTTPTotalTimeoutInvalid          = errors.New("codex.http-timeouts.total must be a positive duration")
+)
+
+// Validate rejects explicitly configured values that are not positive Go durations.
+// Empty fields select their defaults.
+func (c CodexHTTPTimeoutConfig) Validate() error {
+	for _, field := range []struct {
+		raw string
+		err error
+	}{
+		{c.Connect, ErrCodexHTTPConnectTimeoutInvalid},
+		{c.ResponseHeader, ErrCodexHTTPResponseHeaderTimeoutInvalid},
+		{c.StreamIdle, ErrCodexHTTPStreamIdleTimeoutInvalid},
+		{c.Total, ErrCodexHTTPTotalTimeoutInvalid},
+	} {
+		raw := strings.TrimSpace(field.raw)
+		if raw == "" {
+			continue
+		}
+		duration, errParse := time.ParseDuration(raw)
+		if errParse != nil || duration <= 0 {
+			return field.err
+		}
+	}
+	return nil
+}
+
+// CodexHTTPTimeoutDurations contains validated timeout values used by the HTTP transport.
+type CodexHTTPTimeoutDurations struct {
+	Connect        time.Duration
+	ResponseHeader time.Duration
+	StreamIdle     time.Duration
+	Total          time.Duration
+}
+
+// Durations parses positive Go duration strings. Invalid programmatic values safely
+// default; configuration loading rejects them through Validate.
+func (c CodexHTTPTimeoutConfig) Durations() CodexHTTPTimeoutDurations {
+	return CodexHTTPTimeoutDurations{
+		Connect:        positiveDurationOrDefault(c.Connect, DefaultCodexHTTPConnectTimeout),
+		ResponseHeader: positiveDurationOrDefault(c.ResponseHeader, DefaultCodexHTTPResponseHeaderTimeout),
+		StreamIdle:     positiveDurationOrDefault(c.StreamIdle, DefaultCodexHTTPStreamIdleTimeout),
+		Total:          positiveDurationOrDefault(c.Total, DefaultCodexHTTPTotalTimeout),
+	}
+}
+
+func positiveDurationOrDefault(raw string, fallback time.Duration) time.Duration {
+	duration, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || duration <= 0 {
+		return fallback
+	}
+	return duration
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.

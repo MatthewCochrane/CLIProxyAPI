@@ -4,14 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -37,6 +44,199 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 		},
 	}
 }
+
+func TestCodexExecutorOpenAIImageResponsesNonStreamHeaderTimeout(t *testing.T) {
+	cfg := codexImageTimeoutTestConfig("30ms", "1s", "1s")
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}))
+	executor := NewCodexExecutor(cfg)
+	_, err := executor.Execute(ctx, newCodexOpenAIImageTestAuth("https://images.private.test"), codexImageTimeoutTestRequest("dall-e-3"), codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	assertCodexImageTimeout(t, err, helps.ErrCodexResponseHeaderTimeout)
+}
+
+func TestCodexExecutorOpenAIImageResponsesStreamIdleTimeout(t *testing.T) {
+	cfg := codexImageTimeoutTestConfig("1s", "30ms", "1s")
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return codexImageTimeoutResponse(&codexImageWaitBody{ctx: req.Context()}), nil
+	}))
+	executor := NewCodexExecutor(cfg)
+	result, err := executor.ExecuteStream(ctx, newCodexOpenAIImageTestAuth("https://images.private.test"), codexImageTimeoutTestRequest("dall-e-3"), codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	assertCodexImageTimeout(t, codexImageStreamError(result), helps.ErrCodexStreamIdleTimeout)
+}
+
+func TestCodexExecutorDirectOpenAIImageNonStreamTotalTimeout(t *testing.T) {
+	cfg := codexImageTimeoutTestConfig("1s", "200ms", "50ms")
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return codexImageTimeoutResponse(&codexImagePacedBody{ctx: req.Context()}), nil
+	}))
+	executor := NewCodexExecutor(cfg)
+	_, err := executor.Execute(ctx, newCodexOpenAIImageTestAuth("https://images.private.test"), codexImageTimeoutTestRequest("gpt-image-1.5"), codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	assertCodexImageTimeout(t, err, helps.ErrCodexTotalTimeout)
+}
+
+func TestCodexExecutorDirectOpenAIImageStreamIdleTimeout(t *testing.T) {
+	cfg := codexImageTimeoutTestConfig("1s", "30ms", "1s")
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return codexImageTimeoutResponse(&codexImageWaitBody{ctx: req.Context()}), nil
+	}))
+	executor := NewCodexExecutor(cfg)
+	result, err := executor.ExecuteStream(ctx, newCodexOpenAIImageTestAuth("https://images.private.test"), codexImageTimeoutTestRequest("gpt-image-1.5"), codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	assertCodexImageTimeout(t, codexImageStreamError(result), helps.ErrCodexStreamIdleTimeout)
+}
+
+func TestCodexExecutorOpenAIImageStandardTransportConnectTimeoutFallsBackWithoutCooling(t *testing.T) {
+	var successfulRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		successfulRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1713833628,"data":[{"b64_json":"AA=="}]}`))
+	}))
+	defer server.Close()
+
+	dialStarted := make(chan struct{}, 1)
+	releaseDial := make(chan struct{})
+	defer close(releaseDial)
+	dialer := &net.Dialer{}
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if strings.Contains(addr, "connect-timeout.invalid") {
+			select {
+			case dialStarted <- struct{}{}:
+			default:
+			}
+			<-releaseDial
+			return nil, errors.New("test connection attempt released")
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}}
+	defer transport.CloseIdleConnections()
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", transport)
+
+	cfg := &config.Config{Codex: config.CodexConfig{HTTPTimeouts: config.CodexHTTPTimeoutConfig{
+		Connect: "40ms", ResponseHeader: "1s", StreamIdle: "1s", Total: "1s",
+	}}}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	model := "gpt-image-1.5"
+	firstID := fmt.Sprintf("%s-first", t.Name())
+	executor := &codexImageRecordingExecutor{CodexExecutor: NewCodexExecutor(cfg), firstAuthID: firstID}
+	manager.RegisterExecutor(executor)
+	auths := []*cliproxyauth.Auth{
+		{ID: firstID, Provider: "codex", Status: cliproxyauth.StatusActive, Attributes: map[string]string{"api_key": "first", "base_url": "http://connect-timeout.invalid", "priority": "10"}},
+		{ID: fmt.Sprintf("%s-second", t.Name()), Provider: "codex", Status: cliproxyauth.StatusActive, Attributes: map[string]string{"api_key": "second", "base_url": server.URL, "priority": "1"}},
+	}
+	for _, auth := range auths {
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		authID := auth.ID
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+		if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	resp, errExecute := manager.Execute(ctx, []string{"codex"}, codexImageTimeoutTestRequest(model), codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !gjson.GetBytes(resp.Payload, "data.0.b64_json").Exists() || successfulRequests.Load() != 1 {
+		t.Fatalf("response = %s, successful requests = %d", resp.Payload, successfulRequests.Load())
+	}
+	if executor.firstErr == nil || !errors.Is(executor.firstErr, helps.ErrCodexConnectTimeout) || executor.firstErr.Error() != helps.ErrCodexConnectTimeout.Error() {
+		t.Fatalf("first credential error = %v, want fixed %v", executor.firstErr, helps.ErrCodexConnectTimeout)
+	}
+	select {
+	case <-dialStarted:
+	default:
+		t.Fatal("standard transport did not make the timed connection attempt")
+	}
+	first, ok := manager.GetByID(firstID)
+	if !ok || first.Unavailable || !first.NextRetryAfter.IsZero() {
+		t.Fatalf("first credential cooled: found=%t unavailable=%t next-retry=%v", ok, first.Unavailable, first.NextRetryAfter)
+	}
+}
+
+type codexImageRecordingExecutor struct {
+	*CodexExecutor
+	firstAuthID string
+	firstErr    error
+}
+
+func (e *codexImageRecordingExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	resp, err := e.CodexExecutor.Execute(ctx, auth, req, opts)
+	if auth.ID == e.firstAuthID {
+		e.firstErr = err
+	}
+	return resp, err
+}
+
+func codexImageTimeoutTestConfig(responseHeader, streamIdle, total string) *config.Config {
+	return &config.Config{Codex: config.CodexConfig{HTTPTimeouts: config.CodexHTTPTimeoutConfig{
+		Connect: "1s", ResponseHeader: responseHeader, StreamIdle: streamIdle, Total: total,
+	}}}
+}
+
+func codexImageTimeoutTestRequest(model string) cliproxyexecutor.Request {
+	return cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"` + model + `","prompt":"private prompt"}`)}
+}
+
+func codexImageTimeoutResponse(body io.ReadCloser) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+}
+
+func codexImageStreamError(result *cliproxyexecutor.StreamResult) error {
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			return chunk.Err
+		}
+	}
+	return nil
+}
+
+func assertCodexImageTimeout(t *testing.T, got, want error) {
+	t.Helper()
+	if !errors.Is(got, want) || got == nil || got.Error() != want.Error() {
+		t.Fatalf("error = %v, want fixed %v", got, want)
+	}
+	var requestScoped interface{ IsRequestScoped() bool }
+	if !errors.As(got, &requestScoped) || !requestScoped.IsRequestScoped() {
+		t.Fatalf("post-connect timeout %T is not request-scoped", got)
+	}
+	for _, secret := range []string{"private prompt", "images.private.test", "/images/"} {
+		if strings.Contains(got.Error(), secret) {
+			t.Fatalf("timeout error leaked %q: %q", secret, got)
+		}
+	}
+}
+
+type codexImageWaitBody struct{ ctx context.Context }
+
+func (b *codexImageWaitBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*codexImageWaitBody) Close() error { return nil }
+
+type codexImagePacedBody struct{ ctx context.Context }
+
+func (b *codexImagePacedBody) Read(p []byte) (int, error) {
+	select {
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+		p[0] = 'x'
+		return 1, nil
+	}
+}
+
+func (*codexImagePacedBody) Close() error { return nil }
 
 func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T) {
 	var gotPath string

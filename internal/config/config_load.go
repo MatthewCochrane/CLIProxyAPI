@@ -95,6 +95,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
+	if errValidate := cfg.Codex.HTTPTimeouts.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
 	if cfg.Discovery.ServiceType == "" {
 		cfg.Discovery.ServiceType = DefaultDiscoveryServiceType
 	}

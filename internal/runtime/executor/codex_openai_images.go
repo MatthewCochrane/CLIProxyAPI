@@ -120,10 +120,11 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.WrapCodexHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), e.cfg)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
+		errDo = helps.NormalizeCodexHTTPTimeout(errDo)
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return resp, errDo
 	}
@@ -136,6 +137,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
+		errRead = helps.NormalizeCodexHTTPTimeout(errRead)
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
@@ -218,10 +220,11 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.WrapCodexHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), e.cfg)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
+		errDo = helps.NormalizeCodexHTTPTimeout(errDo)
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return nil, errDo
 	}
@@ -232,6 +235,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
+			errRead = helps.NormalizeCodexHTTPTimeout(errRead)
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
@@ -312,6 +316,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			errScan = helps.NormalizeCodexHTTPTimeout(errScan)
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			sendError(errScan)
@@ -349,10 +354,11 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.WrapCodexHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), e.cfg)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
+		errDo = helps.NormalizeCodexHTTPTimeout(errDo)
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return resp, errDo
 	}
@@ -365,6 +371,7 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
+		errRead = helps.NormalizeCodexHTTPTimeout(errRead)
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
@@ -410,10 +417,11 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.WrapCodexHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), e.cfg)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
+		errDo = helps.NormalizeCodexHTTPTimeout(errDo)
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return nil, errDo
 	}
@@ -424,6 +432,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
+			errRead = helps.NormalizeCodexHTTPTimeout(errRead)
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
@@ -464,6 +473,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			}
 			if errRead != nil {
 				if errRead != io.EOF {
+					errRead = helps.NormalizeCodexHTTPTimeout(errRead)
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx, errRead)
 					select {

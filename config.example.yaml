@@ -275,6 +275,15 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Independent bounds for Codex HTTP Responses requests. Values must be positive Go durations;
+  # empty values use these defaults. Millisecond values are supported for controlled testing.
+  # Connect applies only when the selected transport reliably reports connection establishment.
+  # Opaque custom RoundTrippers apply response-header to the entire RoundTrip instead.
+  http-timeouts:
+    connect: "30s"
+    response-header: "60s"
+    stream-idle: "5m"
+    total: "60m"
   # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
   # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
   # announcements of an item or part that is still empty - until the upstream emits its first
@@ -282,7 +291,8 @@ codex:
   # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
   # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
   # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
-  # upstream that trickles frames holds the response headers for as long as the client will wait.
+  # HTTP/SSE trickling is bounded by codex.http-timeouts.stream-idle and total; WebSocket
+  # requests retain their separate read deadline.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
   # right after those handshake events, instead of returning 503 on the wire. Buffering them
   # keeps the downstream response headers uncommitted long enough to transparently retry on
@@ -315,9 +325,8 @@ codex:
   # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
   # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
   # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
-  # wait. Neither is made worse by this option - with it off the same stalled line stalls the
-  # conductor instead, which waits on the same context - but a client-side request timeout, not
-  # proxy_read_timeout, is what bounds them.
+  # wait. The WebSocket case retains its read deadline; Codex HTTP stream-idle and total bound
+  # the SSE case independently of this option.
   # Default: false
   stream-bootstrap-buffering: false
   # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.

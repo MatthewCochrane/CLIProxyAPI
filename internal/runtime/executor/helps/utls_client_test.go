@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"reflect"
 	"strconv"
@@ -171,7 +172,7 @@ func TestUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	connectionDone := make(chan error, 1)
 	go func() {
-		h2Conn, errConnect := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
+		h2Conn, _, errConnect := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
 		if h2Conn != nil {
 			errConnect = errors.Join(errConnect, h2Conn.Close())
 		}
@@ -194,6 +195,53 @@ func TestUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 	}
 	if got := trackedConn.closeCount.Load(); got != 1 {
 		t.Fatalf("connection close count = %d, want 1", got)
+	}
+}
+
+func TestUtlsRoundTripperHandshakeFailureClosesRawConnection(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	trackedConn := &trackedNetConn{Conn: clientConn}
+	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		return trackedConn, nil
+	})}
+	done := make(chan error, 1)
+	go func() {
+		_, _, errConnect := roundTripper.createConnection(t.Context(), "chatgpt.com", "chatgpt.com:443")
+		done <- errConnect
+	}()
+	if errClose := serverConn.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	select {
+	case errConnect := <-done:
+		if errConnect == nil {
+			t.Fatal("createConnection() error = nil, want handshake failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS handshake did not stop after peer close")
+	}
+	if got := trackedConn.closeCount.Load(); got != 1 {
+		t.Fatalf("connection close count = %d, want 1", got)
+	}
+}
+
+func TestNotifyGotConnReportsEstablishedConnection(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+	var got httptrace.GotConnInfo
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { got = info },
+	})
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	notifyGotConn(req, clientConn)
+	if got.Conn == nil || got.Conn != clientConn {
+		t.Fatalf("GotConnInfo.Conn = %v, want established connection %v", got.Conn, clientConn)
 	}
 }
 

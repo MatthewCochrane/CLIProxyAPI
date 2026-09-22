@@ -111,10 +111,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		err = helps.NormalizeCodexHTTPTimeout(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -125,6 +126,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 		if readErr != nil {
+			readErr = helps.NormalizeCodexHTTPTimeout(readErr)
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
@@ -164,7 +166,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	//
 	// In addition to the frame and byte budgets, bootstrapTimeout bounds how long trickled
 	// frames may hold the downstream headers. A peer that never terminates a line is bounded
-	// by the caller's request context.
+	// by codex.http-timeouts.stream-idle, codex.http-timeouts.total, and caller cancellation.
 	bufferedFrames := 0
 	bufferedBytes := 0
 	var initialChunks [][]byte
@@ -305,6 +307,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()
 			if errScan := scanner.Err(); errScan != nil {
+				errScan = helps.NormalizeCodexHTTPTimeout(errScan)
 				// A cancelled downstream request must not be recorded as an upstream failure or
 				// penalise the credential; mirror the unbuffered goroutine's guard.
 				if ctx.Err() != nil {
@@ -439,7 +442,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return
 			}
+			errScan = helps.NormalizeCodexHTTPTimeout(errScan)
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			if helps.IsCodexHTTPTimeout(errScan) {
+				reporter.PublishFailure(ctx, errScan)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
+				return
+			}
 		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)

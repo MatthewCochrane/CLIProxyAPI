@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,19 @@ import (
 // gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
 	dialer proxy.Dialer
+}
+
+func (*utlsRoundTripper) codexConnectTraceReliable(*http.Request) bool { return true }
+
+type onceCloseConn struct {
+	net.Conn
+	once sync.Once
+	err  error
+}
+
+func (c *onceCloseConn) Close() error {
+	c.once.Do(func() { c.err = c.Conn.Close() })
+	return c.err
 }
 
 type closeConnectionBody struct {
@@ -67,39 +81,37 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	return &utlsRoundTripper{dialer: dialer}
 }
 
-func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, net.Conn, error) {
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {
-		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
+		return nil, nil, fmt.Errorf("utls: dialer does not support context cancellation")
 	}
-	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
+	rawConn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
 	if errDial != nil {
-		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
+		return nil, nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
+	conn := &onceCloseConn{Conn: rawConn}
 
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
-		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
-		}
 		if errClose := conn.Close(); errClose != nil {
-			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
+			return nil, nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
 		}
-		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+		return nil, nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
 
 	tr := &http2.Transport{}
 	h2Conn, errClientConn := tr.NewClientConn(tlsConn)
 	if errClientConn != nil {
 		if errClose := tlsConn.Close(); errClose != nil {
-			return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w; close TLS connection: %v", errClientConn, errClose)
+			return nil, nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w; close TLS connection: %v", errClientConn, errClose)
 		}
-		return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
+		return nil, nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
 	}
 
-	return h2Conn, nil
+	return h2Conn, tlsConn, nil
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -110,10 +122,11 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.createConnection(req.Context(), hostname, addr)
+	h2Conn, conn, err := t.createConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
+	notifyGotConn(req, conn)
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
@@ -136,6 +149,12 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 		closeConnection: h2Conn.Close,
 	}
 	return resp, nil
+}
+
+func notifyGotConn(req *http.Request, conn net.Conn) {
+	if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{Conn: conn})
+	}
 }
 
 // claudeCodeSessionCacheCapacity bounds the per-transport TLS session cache for
@@ -352,14 +371,22 @@ type fallbackRoundTripper struct {
 	fallback  http.RoundTripper
 }
 
-func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (f *fallbackRoundTripper) selected(req *http.Request) http.RoundTripper {
 	if IsAnthropicUpstreamURL(req.URL) {
-		return f.anthropic.RoundTrip(req)
+		return f.anthropic
 	}
 	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
-		return f.chrome.RoundTrip(req)
+		return f.chrome
 	}
-	return f.fallback.RoundTrip(req)
+	return f.fallback
+}
+
+func (f *fallbackRoundTripper) codexConnectTraceReliable(req *http.Request) bool {
+	return codexTransportConnectTraceReliable(f.selected(req), req)
+}
+
+func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f.selected(req).RoundTrip(req)
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS

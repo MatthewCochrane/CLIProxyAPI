@@ -79,8 +79,9 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth)
+	httpResp, err := httpClient.Do(httpReq)
+	return httpResp, helps.NormalizeCodexHTTPTimeout(err)
 }
 
 type codexIdentityConfuseState struct {

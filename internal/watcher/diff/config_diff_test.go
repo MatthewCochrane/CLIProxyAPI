@@ -212,6 +212,52 @@ func TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility(t *testing.
 	expectContains(t, changes, "codex.orphan-delegation-compatibility: false -> true")
 }
 
+func TestBuildConfigChangeDetailsCodexHTTPTimeouts(t *testing.T) {
+	oldCfg := &config.Config{Codex: config.CodexConfig{HTTPTimeouts: config.CodexHTTPTimeoutConfig{
+		Connect: "30s", ResponseHeader: "60s", StreamIdle: "5m", Total: "60m",
+	}}}
+	newCfg := &config.Config{Codex: config.CodexConfig{HTTPTimeouts: config.CodexHTTPTimeoutConfig{
+		Connect: "250ms", ResponseHeader: "2s", StreamIdle: "10s", Total: "5m",
+	}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex.http-timeouts.connect: 30s -> 250ms")
+	expectContains(t, changes, "codex.http-timeouts.response-header: 1m0s -> 2s")
+	expectContains(t, changes, "codex.http-timeouts.stream-idle: 5m0s -> 10s")
+	expectContains(t, changes, "codex.http-timeouts.total: 1h0m0s -> 5m0s")
+}
+
+func TestBuildConfigChangeDetailsCodexHTTPTimeoutsUsesEffectiveDurations(t *testing.T) {
+	tests := []struct {
+		name string
+		old  config.CodexHTTPTimeoutConfig
+		new  config.CodexHTTPTimeoutConfig
+	}{
+		{
+			name: "empty equals defaults",
+			new: config.CodexHTTPTimeoutConfig{
+				Connect: "30s", ResponseHeader: "60s", StreamIdle: "5m", Total: "60m",
+			},
+		},
+		{
+			name: "equivalent spellings",
+			old:  config.CodexHTTPTimeoutConfig{ResponseHeader: "60s"},
+			new:  config.CodexHTTPTimeoutConfig{ResponseHeader: "1m"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldCfg := &config.Config{Codex: config.CodexConfig{HTTPTimeouts: tt.old}}
+			newCfg := &config.Config{Codex: config.CodexConfig{HTTPTimeouts: tt.new}}
+			for _, change := range BuildConfigChangeDetails(oldCfg, newCfg) {
+				if strings.HasPrefix(change, "codex.http-timeouts.") {
+					t.Fatalf("unexpected effective timeout change: %s", change)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	oldRetry := 1
 	newRetry := 0

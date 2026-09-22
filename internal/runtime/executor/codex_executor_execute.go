@@ -102,10 +102,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		err = helps.NormalizeCodexHTTPTimeout(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -116,7 +117,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
+		if timeoutErr := helps.NormalizeCodexHTTPTimeout(errRead); helps.IsCodexHTTPTimeout(timeoutErr) {
+			return resp, timeoutErr
+		}
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
 			return resp, errClearReplay
@@ -199,6 +203,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, nil
 	}
 	if errRead != nil {
+		if timeoutErr := helps.NormalizeCodexHTTPTimeout(errRead); helps.IsCodexHTTPTimeout(timeoutErr) {
+			return resp, timeoutErr
+		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errCtx)
 			err = errCtx
@@ -275,10 +282,11 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		err = helps.NormalizeCodexHTTPTimeout(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -289,7 +297,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
+		if timeoutErr := helps.NormalizeCodexHTTPTimeout(errRead); helps.IsCodexHTTPTimeout(timeoutErr) {
+			return resp, timeoutErr
+		}
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
@@ -298,6 +309,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		err = helps.NormalizeCodexHTTPTimeout(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}

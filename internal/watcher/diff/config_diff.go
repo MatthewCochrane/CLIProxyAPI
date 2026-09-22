@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
@@ -142,6 +143,22 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
 		changes = append(changes, fmt.Sprintf("codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking, newCfg.Codex.DisableCodexCloaking))
+	}
+	oldCodexTimeouts := oldCfg.Codex.HTTPTimeouts.Durations()
+	newCodexTimeouts := newCfg.Codex.HTTPTimeouts.Durations()
+	for _, timeout := range []struct {
+		name string
+		old  time.Duration
+		new  time.Duration
+	}{
+		{"connect", oldCodexTimeouts.Connect, newCodexTimeouts.Connect},
+		{"response-header", oldCodexTimeouts.ResponseHeader, newCodexTimeouts.ResponseHeader},
+		{"stream-idle", oldCodexTimeouts.StreamIdle, newCodexTimeouts.StreamIdle},
+		{"total", oldCodexTimeouts.Total, newCodexTimeouts.Total},
+	} {
+		if timeout.old != timeout.new {
+			changes = append(changes, fmt.Sprintf("codex.http-timeouts.%s: %s -> %s", timeout.name, timeout.old, timeout.new))
+		}
 	}
 	if oldCfg.Codex.StreamBootstrapBuffering != newCfg.Codex.StreamBootstrapBuffering {
 		changes = append(changes, fmt.Sprintf("codex.stream-bootstrap-buffering: %t -> %t", oldCfg.Codex.StreamBootstrapBuffering, newCfg.Codex.StreamBootstrapBuffering))
