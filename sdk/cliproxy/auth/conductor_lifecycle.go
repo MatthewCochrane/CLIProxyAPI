@@ -115,6 +115,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Generation = 1
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	m.advanceAuthMembershipGenerationLocked()
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -272,6 +273,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	if auth.RegistrationEpoch != existing.RegistrationEpoch {
+		m.advanceAuthMembershipGenerationLocked()
+	}
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -313,6 +317,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
+	m.advanceAuthMembershipGenerationLocked()
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
 	}
@@ -409,6 +414,11 @@ func (m *Manager) Load(ctx context.Context) error {
 				epoch: m.authEpochs[prevID],
 			})
 		}
+	}
+	if len(previousAuths) > 0 || len(m.auths) > 0 {
+		// Load gives every retained auth a new registration epoch, so any
+		// non-empty replacement changes authoritative membership incarnations.
+		m.advanceAuthMembershipGenerationLocked()
 	}
 
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)

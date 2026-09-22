@@ -1501,6 +1501,71 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// AuthMembership is the credential-free identity and incarnation of one auth.
+type AuthMembership struct {
+	ID                string
+	RegistrationEpoch uint64
+}
+
+// advanceAuthMembershipGenerationLocked records an ID-set or incarnation change.
+// The caller must hold m.mu. Zero is reserved for consumers with no cached state.
+func (m *Manager) advanceAuthMembershipGenerationLocked() {
+	m.authMembershipGeneration++
+	if m.authMembershipGeneration == 0 {
+		// A wrap changes the value from MaxUint64 to 1 and therefore invalidates
+		// every cache that observed the immediately preceding generation.
+		m.authMembershipGeneration = 1
+	}
+}
+
+// AuthMembership returns one current auth incarnation together with the
+// generation of the complete membership set. It never clones credential data.
+func (m *Manager) AuthMembership(id string) (generation, registrationEpoch uint64, ok bool) {
+	if m == nil {
+		return 0, 0, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	generation = m.authMembershipGeneration
+	if id == "" {
+		return generation, 0, false
+	}
+	auth, ok := m.auths[id]
+	if !ok || auth == nil {
+		return generation, 0, false
+	}
+	return generation, auth.RegistrationEpoch, true
+}
+
+// AuthMembershipSnapshot atomically returns the membership generation and only
+// credential-free IDs and registration epochs.
+func (m *Manager) AuthMembershipSnapshot() (uint64, []AuthMembership) {
+	if m == nil {
+		return 0, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	memberships := make([]AuthMembership, 0, len(m.auths))
+	for id, auth := range m.auths {
+		if auth != nil {
+			memberships = append(memberships, AuthMembership{ID: id, RegistrationEpoch: auth.RegistrationEpoch})
+		}
+	}
+	return m.authMembershipGeneration, memberships
+}
+
+// RegistrationEpoch returns the current incarnation for an auth ID.
+func (m *Manager) RegistrationEpoch(id string) (uint64, bool) {
+	_, epoch, ok := m.AuthMembership(id)
+	return epoch, ok
+}
+
+// ListAuthMemberships returns credential-free current auth incarnations.
+func (m *Manager) ListAuthMemberships() []AuthMembership {
+	_, memberships := m.AuthMembershipSnapshot()
+	return memberships
+}
+
 // GetByID retrieves an auth entry by its ID.
 func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if id == "" {

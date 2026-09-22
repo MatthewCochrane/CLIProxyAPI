@@ -83,6 +83,18 @@ type Hooks struct {
 	OnAfterStart func(*Service)
 }
 
+type routingAuthSourceSetter interface {
+	SetAuthSource(func() []*coreauth.Auth)
+}
+
+type routingAuthSourcesSetter interface {
+	SetAuthSources(
+		func() []*coreauth.Auth,
+		func(string) (uint64, uint64, bool),
+		func() (uint64, []coreauth.AuthMembership),
+	)
+}
+
 // NewBuilder creates a Builder with default dependencies left unset.
 // Use the fluent interface methods to configure the service before calling Build().
 //
@@ -290,6 +302,11 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	if sourceSetter, ok := b.routingObserver.(routingAuthSourcesSetter); ok {
+		sourceSetter.SetAuthSources(coreManager.List, coreManager.AuthMembership, coreManager.AuthMembershipSnapshot)
+	} else if sourceSetter, ok := b.routingObserver.(routingAuthSourceSetter); ok {
+		sourceSetter.SetAuthSource(coreManager.List)
+	}
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}

@@ -933,6 +933,12 @@ type AffinityObserver interface {
 	ObserveAffinity(event AffinityEvent, authID string)
 }
 
+// VersionedAffinityObserver optionally observes an affinity outcome for the
+// exact selected auth incarnation.
+type VersionedAffinityObserver interface {
+	ObserveAffinityVersioned(event AffinityEvent, authID string, registrationEpoch uint64)
+}
+
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback         Selector
@@ -972,6 +978,10 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 
 func (s *SessionAffinitySelector) observe(event AffinityEvent, auth *Auth) {
 	if s != nil && s.observer != nil && auth != nil && auth.ID != "" {
+		if observer, ok := s.observer.(VersionedAffinityObserver); ok {
+			observer.ObserveAffinityVersioned(event, auth.ID, auth.RegistrationEpoch)
+			return
+		}
 		s.observer.ObserveAffinity(event, auth.ID)
 	}
 }
