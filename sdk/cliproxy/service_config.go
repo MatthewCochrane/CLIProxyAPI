@@ -62,7 +62,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
-func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+func newRoutingSelector(state routingRuntimeState, observers ...coreauth.AffinityObserver) coreauth.Selector {
 	var selector coreauth.Selector
 	switch state.strategy {
 	case "weighted-round-robin":
@@ -74,10 +74,15 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
+		var observer coreauth.AffinityObserver
+		if len(observers) > 0 {
+			observer = observers[0]
+		}
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback:         selector,
 			TTL:              state.sessionAffinityTTL,
 			SubagentAffinity: &subagents,
+			Observer:         observer,
 		})
 	}
 	return selector
@@ -215,7 +220,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.coreManager.SetSelector(newRoutingSelector(routingState, s.routingObserver))
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

@@ -60,6 +60,12 @@ type Builder struct {
 	// resultPolicy intercepts execution results before quota mutation and persistence.
 	resultPolicy coreauth.ResultPolicy
 
+	// coreAuthHook observes core auth lifecycle events.
+	coreAuthHook coreauth.Hook
+
+	// routingObserver observes fixed session-affinity outcomes.
+	routingObserver coreauth.AffinityObserver
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 }
@@ -195,6 +201,18 @@ func (b *Builder) WithResultPolicy(policy coreauth.ResultPolicy) *Builder {
 	return b
 }
 
+// WithCoreAuthHook sets the hook used when Builder creates the core auth manager.
+func (b *Builder) WithCoreAuthHook(hook coreauth.Hook) *Builder {
+	b.coreAuthHook = hook
+	return b
+}
+
+// WithRoutingObserver observes fixed affinity outcomes across selector reloads.
+func (b *Builder) WithRoutingObserver(observer coreauth.AffinityObserver) *Builder {
+	b.routingObserver = observer
+	return b
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {
@@ -202,6 +220,9 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
+	}
+	if b.coreManager != nil && (b.coreAuthHook != nil || b.routingObserver != nil) {
+		return nil, fmt.Errorf("cliproxy: WithCoreAuthManager cannot be combined with WithCoreAuthHook or WithRoutingObserver")
 	}
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
@@ -262,7 +283,7 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		routingState := normalizedRoutingRuntimeState(b.cfg)
-		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
+		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState, b.routingObserver), b.coreAuthHook)
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
@@ -290,6 +311,7 @@ func (b *Builder) Build() (*Service, error) {
 		pluginHost:          pluginHost,
 		discoveryManager:    newDiscoveryAdvertiserManager(),
 		appliedRoutingState: appliedRoutingState,
+		routingObserver:     b.routingObserver,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {

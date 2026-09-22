@@ -914,6 +914,23 @@ type SessionAffinitySelector struct {
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	observer         AffinityObserver
+}
+
+// AffinityEvent is a fixed, privacy-safe routing outcome.
+type AffinityEvent uint8
+
+const (
+	AffinityEventHit AffinityEvent = iota + 1
+	AffinityEventMiss
+	AffinityEventRebind
+	AffinityEventNoSession
+)
+
+// AffinityObserver observes routing outcomes. Implementations must transform
+// authID immediately and must not retain it in raw form.
+type AffinityObserver interface {
+	ObserveAffinity(event AffinityEvent, authID string)
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -921,6 +938,7 @@ type SessionAffinityConfig struct {
 	Fallback         Selector
 	TTL              time.Duration
 	SubagentAffinity *bool
+	Observer         AffinityObserver
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -948,6 +966,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cache:            NewSessionCache(cfg.TTL),
 		matcher:          cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity: subagentAffinity,
+		observer:         cfg.Observer,
+	}
+}
+
+func (s *SessionAffinitySelector) observe(event AffinityEvent, auth *Auth) {
+	if s != nil && s.observer != nil && auth != nil && auth.ID != "" {
+		s.observer.ObserveAffinity(event, auth.ID)
 	}
 }
 
@@ -1022,7 +1047,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		if errPick == nil {
+			s.observe(AffinityEventNoSession, auth)
+		}
+		return auth, errPick
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
@@ -1059,6 +1088,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				s.observe(AffinityEventHit, auth)
 				return auth, nil
 			}
 		}
@@ -1072,23 +1102,27 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		s.observe(AffinityEventRebind, auth)
 		return auth, nil
 	}
 
+	fallbackBindingUnavailable := false
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == cachedAuthID {
-					if !isSubagent || s.subagentAffinity {
+			if !isSubagent || s.subagentAffinity {
+				for _, auth := range available {
+					if auth.ID == cachedAuthID {
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
+						s.observe(AffinityEventHit, auth)
 						return auth, nil
 					}
 				}
+				fallbackBindingUnavailable = true
 			}
 		}
 	}
@@ -1105,6 +1139,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 	} else {
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+	}
+	if fallbackBindingUnavailable {
+		s.observe(AffinityEventRebind, auth)
+	} else {
+		s.observe(AffinityEventMiss, auth)
 	}
 	return auth, nil
 }
@@ -1139,7 +1178,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		return nil, true, errAvailable
 	}
 
-	if match, ok := s.matcher.MatchFingerprints(namespace, fingerprints, minPrefixLength); ok {
+	match, hadMatch := s.matcher.MatchFingerprints(namespace, fingerprints, minPrefixLength)
+	if hadMatch {
 		for _, auth := range available {
 			if auth == nil || auth.ID != match.AuthID {
 				continue
@@ -1167,6 +1207,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			s.observe(AffinityEventHit, auth)
 			return auth, true, nil
 		}
 	}
@@ -1201,6 +1242,11 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), auth.ID, provider, model)
 		}
+	}
+	if hadMatch {
+		s.observe(AffinityEventRebind, auth)
+	} else {
+		s.observe(AffinityEventMiss, auth)
 	}
 	return auth, true, nil
 }
