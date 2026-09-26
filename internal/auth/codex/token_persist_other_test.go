@@ -16,3 +16,10 @@ func TestSaveTokenToFileFailsClosedOutsideLinux(t *testing.T) {
 		t.Fatalf("SaveTokenToFile() exposed credential data: %v", err)
 	}
 }
+
+func TestSaveNewTokenToFileFailsClosedOutsideLinux(t *testing.T) {
+	err := (&CodexTokenStorage{AccessToken: "credential-secret"}).SaveNewTokenToFile("codex.json")
+	if err == nil || !strings.Contains(err.Error(), "only supported on Linux") || strings.Contains(err.Error(), "credential-secret") {
+		t.Fatal("create-only Codex persistence must fail closed without exposing credentials")
+	}
+}

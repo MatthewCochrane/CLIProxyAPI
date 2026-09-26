@@ -10,27 +10,45 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
 
 var syncTokenParent = unix.Fsync
+var tokenDirectoryMu sync.Mutex
 
 type tokenCommitDurabilityUncertainError struct{}
 
 func (tokenCommitDurabilityUncertainError) Error() string {
-	return "Codex token file was replaced but durability is uncertain"
+	return "Codex token file is visible but durability is uncertain"
 }
 
 // CommitVisible reports that the new credential is already visible at the
 // destination even though its directory entry was not proven crash-durable.
 func (tokenCommitDurabilityUncertainError) CommitVisible() bool { return true }
 
-// ErrTokenCommitDurabilityUncertain means the replacement is visible but its
-// directory entry could not be proven durable across a host crash.
+// ErrTokenCommitDurabilityUncertain means a new or replacement credential is
+// visible, but its directory entry could not be proven durable after a crash.
 var ErrTokenCommitDurabilityUncertain = tokenCommitDurabilityUncertainError{}
 
 func persistTokenFile(path string, raw []byte) error {
+	return persistTokenFileMode(path, raw, false, "")
+}
+
+// persistNewTokenFile creates a credential without replacing any existing
+// destination, including one introduced concurrently after initial validation.
+func persistNewTokenFile(path string, raw []byte) error {
+	return persistTokenFileMode(path, raw, true, "")
+}
+
+func persistNewAccountTokenFile(path string, raw []byte, accountID string) error {
+	return persistTokenFileMode(path, raw, true, accountID)
+}
+
+func persistTokenFileMode(path string, raw []byte, createOnly bool, accountID string) error {
+	tokenDirectoryMu.Lock()
+	defer tokenDirectoryMu.Unlock()
 	path = filepath.Clean(path)
 	name := filepath.Base(path)
 	if name == "." || name == string(filepath.Separator) || strings.ContainsRune(name, filepath.Separator) {
@@ -45,6 +63,11 @@ func persistTokenFile(path string, raw []byte) error {
 
 	if errValidate := validateTokenParent(parentFD); errValidate != nil {
 		return errValidate
+	}
+	if accountID != "" {
+		if errUnique := checkTokenAccountUnique(parentFD, accountID); errUnique != nil {
+			return errUnique
+		}
 	}
 	if errValidate := validateTokenDestination(parentFD, name); errValidate != nil {
 		return errValidate
@@ -77,7 +100,11 @@ func persistTokenFile(path string, raw []byte) error {
 	if errClose := file.Close(); errClose != nil {
 		return fmt.Errorf("failed to close token file: %w", errClose)
 	}
-	if errRename := unix.Renameat(parentFD, tempName, parentFD, name); errRename != nil {
+	if createOnly {
+		if errRename := unix.Renameat2(parentFD, tempName, parentFD, name, unix.RENAME_NOREPLACE); errRename != nil {
+			return fmt.Errorf("failed to create token file: %w", errRename)
+		}
+	} else if errRename := unix.Renameat(parentFD, tempName, parentFD, name); errRename != nil {
 		return fmt.Errorf("failed to replace token file: %w", errRename)
 	}
 	committed = true

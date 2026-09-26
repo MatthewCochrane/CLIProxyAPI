@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ const (
 	codexDeviceTokenExchangeRedirectURI   = "https://auth.openai.com/deviceauth/callback"
 	codexDeviceTimeout                    = 15 * time.Minute
 	codexDeviceDefaultPollIntervalSeconds = 5
+	codexDeviceMaxResponseBytes           = 64 << 10
 )
 
 type codexDeviceUserCodeRequest struct {
@@ -63,8 +65,13 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(ctx, codexDeviceTimeout)
+	defer cancel()
 
 	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	if a.deviceClient != nil {
+		httpClient = a.deviceClient
+	}
 
 	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
@@ -76,17 +83,16 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		deviceCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
 	}
 	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
-	if deviceCode == "" || deviceAuthID == "" {
+	if !validCodexDeviceCode(deviceCode) || deviceAuthID == "" || len(deviceAuthID) > 4096 {
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
 	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
 
-	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
-
-	if !opts.NoBrowser {
+	if errDeliver := deliverCodexDeviceChallenge(opts, codexDeviceVerificationURL, deviceCode, os.Stdout); errDeliver != nil {
+		return nil, errDeliver
+	}
+	if opts.OnCodexDeviceCode == nil && !opts.NoBrowser {
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the device URL manually")
 		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
@@ -120,7 +126,33 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(authSvc, authBundle, opts.OnCodexDeviceCode == nil)
+}
+
+func validCodexDeviceCode(code string) bool {
+	if len(code) < 4 || len(code) > 64 {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func deliverCodexDeviceChallenge(opts *LoginOptions, verificationURL, code string, output io.Writer) error {
+	if opts.OnCodexDeviceCode != nil {
+		if errDeliver := opts.OnCodexDeviceCode(verificationURL, code); errDeliver != nil {
+			// A callback error could contain the transient code; never wrap it.
+			return fmt.Errorf("private codex device challenge was not delivered")
+		}
+		return nil
+	}
+	_, _ = fmt.Fprintln(output, "Starting Codex device authentication...")
+	_, _ = fmt.Fprintf(output, "Codex device URL: %s\nCodex device code: %s\n", verificationURL, code)
+	return nil
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -142,9 +174,12 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, codexDeviceMaxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read codex device code response: %w", err)
+	}
+	if len(respBody) > codexDeviceMaxResponseBytes {
+		return nil, fmt.Errorf("codex device code response exceeded size limit")
 	}
 
 	if !codexDeviceIsSuccessStatus(resp.StatusCode) {
@@ -194,10 +229,13 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, codexDeviceMaxResponseBytes+1))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("failed to read codex device poll response: %w", readErr)
+		}
+		if len(respBody) > codexDeviceMaxResponseBytes {
+			return nil, fmt.Errorf("codex device poll response exceeded size limit")
 		}
 
 		switch {
@@ -249,7 +287,7 @@ func codexDeviceIsSuccessStatus(code int) bool {
 	return code >= 200 && code < 300
 }
 
-func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle, announce bool) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -273,9 +311,11 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		"email": tokenStorage.Email,
 	}
 
-	fmt.Println("Codex authentication successful")
-	if authBundle.APIKey != "" {
-		fmt.Println("Codex API key obtained and stored")
+	if announce {
+		fmt.Println("Codex authentication successful")
+		if authBundle.APIKey != "" {
+			fmt.Println("Codex API key obtained and stored")
+		}
 	}
 
 	return &coreauth.Auth{

@@ -153,7 +153,17 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 }
 
 func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true)
+	standard := accessAuthMiddleware(manager, true)
+	return func(c *gin.Context) {
+		// A realtime client secret can outlive revocation of the environment
+		// key that minted it. Do not issue delegated bearer credentials until
+		// that separate lifetime has an exact revocation fence.
+		if manager != nil && manager.EnvironmentKeysEnabled() && c.Request.URL.Path == "/v1/realtime/client_secrets" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{"code": "managed_realtime_unavailable"}})
+			return
+		}
+		standard(c)
+	}
 }
 
 func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
@@ -202,6 +212,12 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler) gin.HandlerFunc {
 	fallback := realtimeStandardAuthMiddleware(manager)
 	return func(c *gin.Context) {
+		if manager != nil && manager.EnvironmentKeysEnabled() {
+			// Existing ephemeral secrets from the previous shared-key service
+			// must not bypass a freshly revoked managed environment key.
+			fallback(c)
+			return
+		}
 		authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(c.Request)
 		if !matched {
 			fallback(c)

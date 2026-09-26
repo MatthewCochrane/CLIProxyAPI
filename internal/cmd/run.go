@@ -13,13 +13,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	routingobs "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/observability"
 	logrus "github.com/sirupsen/logrus"
@@ -39,9 +42,14 @@ type routingObservabilityConfig struct {
 }
 
 type routingObservabilityRuntime struct {
-	listener net.Listener
-	server   *http.Server
-	observer *routingobs.Observer
+	listener        net.Listener
+	server          *http.Server
+	observer        *routingobs.Observer
+	controlListener net.Listener
+	enrollment      *enrollmentController
+	keyStore        *sdkaccess.EnvironmentKeyStore
+	keyAuthDir      string
+	controlServer   *http.Server
 }
 
 func loadRoutingObservabilityConfig(lookup func(string) (string, bool)) (*routingObservabilityConfig, error) {
@@ -81,8 +89,12 @@ func loadRoutingObservabilityConfig(lookup func(string) (string, bool)) (*routin
 	return &routingObservabilityConfig{addr: addr, token: token, hmacKey: []byte(hmacKey)}, nil
 }
 
-func newRoutingObservabilityRuntime() (*routingObservabilityRuntime, error) {
+func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObservabilityRuntime, error) {
 	cfg, err := loadRoutingObservabilityConfig(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	control, err := loadControlConfig(os.LookupEnv, cfg)
 	if err != nil || cfg == nil {
 		return nil, err
 	}
@@ -99,52 +111,162 @@ func newRoutingObservabilityRuntime() (*routingObservabilityRuntime, error) {
 		MaxHeaderBytes:    8 << 10,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
-	return &routingObservabilityRuntime{listener: listener, server: server, observer: observer}, nil
+	runtime := &routingObservabilityRuntime{listener: listener, server: server, observer: observer}
+	if control != nil {
+		if control.keys {
+			if serviceConfig == nil || !filepath.IsAbs(serviceConfig.AuthDir) ||
+				pathContains(control.keyStoreDir, serviceConfig.AuthDir) || pathContains(serviceConfig.AuthDir, control.keyStoreDir) {
+				runtime.close()
+				return nil, fmt.Errorf("private inference-key store must be separate from the credential directory")
+			}
+			info, errDir := os.Lstat(serviceConfig.AuthDir)
+			if errDir != nil || !info.IsDir() || info.Mode().Perm() != 0o700 || !controlAuthDirOwner(info) {
+				runtime.close()
+				return nil, fmt.Errorf("private inference keys require a private owned auth directory")
+			}
+			for path := filepath.Clean(serviceConfig.AuthDir); ; path = filepath.Dir(path) {
+				entry, errEntry := os.Lstat(path)
+				if errEntry != nil || entry.Mode()&os.ModeSymlink != 0 {
+					runtime.close()
+					return nil, fmt.Errorf("private inference keys require no symlink in auth directory ancestry")
+				}
+				if filepath.Dir(path) == path {
+					break
+				}
+			}
+			runtime.keyStore, err = sdkaccess.NewEnvironmentKeyStore(control.keyStoreDir)
+			if err != nil {
+				runtime.close()
+				return nil, fmt.Errorf("private inference-key store is unavailable")
+			}
+			runtime.keyAuthDir = serviceConfig.AuthDir
+		}
+		if control.enrollment {
+			if serviceConfig == nil || !filepath.IsAbs(serviceConfig.AuthDir) {
+				runtime.close()
+				return nil, fmt.Errorf("private enrollment requires an absolute existing auth directory")
+			}
+			info, errDir := os.Lstat(serviceConfig.AuthDir)
+			if errDir != nil || !info.IsDir() || info.Mode().Perm() != 0o700 || !controlAuthDirOwner(info) {
+				runtime.close()
+				return nil, fmt.Errorf("private enrollment requires a private owned auth directory")
+			}
+			for path := filepath.Clean(serviceConfig.AuthDir); ; path = filepath.Dir(path) {
+				entry, errEntry := os.Lstat(path)
+				if errEntry != nil || entry.Mode()&os.ModeSymlink != 0 {
+					runtime.close()
+					return nil, fmt.Errorf("private enrollment requires no symlink in auth directory ancestry")
+				}
+				if filepath.Dir(path) == path {
+					break
+				}
+			}
+			runtime.enrollment = newEnrollmentController(serviceConfig)
+		}
+		runtime.controlListener, err = net.Listen("tcp", control.addr)
+		if err != nil {
+			runtime.close()
+			return nil, fmt.Errorf("listen for private control: %w", err)
+		}
+		var enrollmentHandler, keyHandler http.Handler
+		if runtime.enrollment != nil {
+			enrollmentHandler = http.HandlerFunc(runtime.enrollment.handle)
+		}
+		if runtime.keyStore != nil {
+			keyHandler = http.HandlerFunc((&environmentKeyController{store: runtime.keyStore}).handle)
+		}
+		if enrollmentHandler != nil || keyHandler != nil {
+			runtime.controlServer = newControlServerWithKeys(observer, control.token, enrollmentHandler, keyHandler)
+		} else {
+			runtime.controlServer = newControlServer(observer, control.token)
+		}
+	}
+	return runtime, nil
+}
+
+func pathContains(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (r *routingObservabilityRuntime) close() {
+	if r != nil && r.enrollment != nil {
+		r.enrollment.close()
+	}
+	if r != nil && r.keyStore != nil {
+		_ = r.keyStore.Close()
+	}
 	if r != nil && r.listener != nil {
 		_ = r.listener.Close()
+	}
+	if r != nil && r.controlListener != nil {
+		_ = r.controlListener.Close()
 	}
 }
 
 func (r *routingObservabilityRuntime) start(ctx context.Context, cancel context.CancelFunc) <-chan error {
+	if r.enrollment != nil {
+		r.enrollment.bindService(ctx)
+		go func() {
+			<-ctx.Done()
+			r.enrollment.close()
+		}()
+	}
 	done := make(chan error, 1)
-	serveDone := make(chan error, 1)
-	go func() {
-		err := r.server.Serve(r.listener)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		if err != nil {
-			cancel()
-		}
-		serveDone <- err
-	}()
-	go func() {
-		select {
-		case err := <-serveDone:
-			done <- err
-		case <-ctx.Done():
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			shutdownErr := r.server.Shutdown(shutdownCtx)
-			shutdownCancel()
-			if shutdownErr != nil {
-				_ = r.server.Close()
+	serve := func(server *http.Server, listener net.Listener) <-chan error {
+		serveDone := make(chan error, 1)
+		result := make(chan error, 1)
+		go func() {
+			err := server.Serve(listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
 			}
-			serveErr := <-serveDone
-			if serveErr != nil {
-				done <- serveErr
-			} else {
-				done <- shutdownErr
+			if err != nil {
+				cancel()
+			}
+			serveDone <- err
+		}()
+		go func() {
+			select {
+			case err := <-serveDone:
+				result <- err
+			case <-ctx.Done():
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				shutdownErr := server.Shutdown(shutdownCtx)
+				shutdownCancel()
+				if shutdownErr != nil {
+					_ = server.Close()
+				}
+				serveErr := <-serveDone
+				if serveErr != nil {
+					result <- serveErr
+				} else {
+					result <- shutdownErr
+				}
+			}
+		}()
+		return result
+	}
+	primaryDone := serve(r.server, r.listener)
+	var controlDone <-chan error
+	if r.controlServer != nil {
+		controlDone = serve(r.controlServer, r.controlListener)
+	}
+	go func() {
+		primaryErr := <-primaryDone
+		cancel()
+		if controlDone != nil {
+			if controlErr := <-controlDone; primaryErr == nil {
+				primaryErr = controlErr
 			}
 		}
+		done <- primaryErr
 	}()
 	return done
 }
 
 func newServiceBuilder(cfg *config.Config, configPath, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) (*cliproxy.Builder, *routingObservabilityRuntime, error) {
-	runtime, err := newRoutingObservabilityRuntime()
+	runtime, err := newRoutingObservabilityRuntime(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -162,6 +284,22 @@ func newServiceBuilder(cfg *config.Config, configPath, localPassword string, hos
 }
 
 func runService(ctx context.Context, service *cliproxy.Service, runtime *routingObservabilityRuntime) error {
+	if runtime != nil && runtime.keyStore != nil {
+		if err := service.PinControlAuthDir(runtime.keyAuthDir); err != nil {
+			runtime.close()
+			return err
+		}
+		if err := service.BindEnvironmentKeyStore(runtime.keyStore); err != nil {
+			runtime.close()
+			return err
+		}
+	}
+	if runtime != nil && runtime.enrollment != nil {
+		if err := service.PinControlAuthDir(runtime.enrollment.authDir); err != nil {
+			runtime.close()
+			return err
+		}
+	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 	var observabilityDone <-chan error
@@ -169,6 +307,9 @@ func runService(ctx context.Context, service *cliproxy.Service, runtime *routing
 		observabilityDone = runtime.start(runCtx, runCancel)
 	}
 	serviceErr := service.Run(runCtx)
+	if runtime != nil && runtime.enrollment != nil {
+		runtime.enrollment.close()
+	}
 	runCancel()
 	if observabilityDone != nil {
 		if observabilityErr := <-observabilityDone; observabilityErr != nil {

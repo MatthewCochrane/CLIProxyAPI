@@ -34,6 +34,9 @@ type Service struct {
 
 	// configUpdateMu serializes config updates across watcher + home.
 	configUpdateMu sync.Mutex
+	// controlAuthDir pins the private enrollment writer to the service's
+	// authoritative credential directory across configuration reloads.
+	controlAuthDir string
 
 	// configRuntimeMu orders side-effecting runtime application after config commits.
 	configRuntimeMu        sync.Mutex

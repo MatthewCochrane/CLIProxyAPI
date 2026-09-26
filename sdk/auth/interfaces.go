@@ -19,6 +19,10 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	// OnCodexDeviceCode delivers the short-lived device challenge privately.
+	// Callers must not persist or log either value. When set, the device flow
+	// never prints the challenge or attempts to open a browser.
+	OnCodexDeviceCode func(verificationURL, code string) error
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

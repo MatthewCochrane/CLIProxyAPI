@@ -4,6 +4,7 @@ package codex
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -71,6 +72,155 @@ func TestSaveTokenToFileReplacement(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "codex.json" {
 		t.Fatalf("directory entries after replacement = %+v", entries)
+	}
+}
+
+func TestSaveNewTokenToFileNeverReplacesExistingCredential(t *testing.T) {
+	root := privateTempDir(t)
+	path := filepath.Join(root, "codex-new.json")
+	first := &CodexTokenStorage{AccountID: "account-a", AccessToken: "first-access", RefreshToken: "first-refresh"}
+	second := &CodexTokenStorage{AccountID: "account-a", AccessToken: "second-access", RefreshToken: "second-refresh"}
+	if err := first.SaveNewTokenToFile(path); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SaveNewTokenToFile(path); !errors.Is(err, unix.EEXIST) {
+		t.Fatal("create-only commit replaced a preexisting credential")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed create-only commit changed existing credential")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("failed create-only commit left a temporary token file")
+	}
+}
+
+func TestSaveNewTokenToFileConcurrentCreatorsHaveOneWinner(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), "codex-new.json")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, access := range []string{"first", "second"} {
+		go func() {
+			<-start
+			results <- (&CodexTokenStorage{AccountID: "same-account", AccessToken: access}).SaveNewTokenToFile(path)
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if !((first == nil && errors.Is(second, unix.EEXIST)) || (second == nil && errors.Is(first, unix.EEXIST))) {
+		t.Fatalf("create-only writers did not have exactly one winner: %v, %v", first, second)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(contents, []byte(`"access_token": "first"`)) && !bytes.Contains(contents, []byte(`"access_token": "second"`)) {
+		t.Fatal("winner's credential was not atomically published")
+	}
+}
+
+func newEnrollmentStorage(id string) *CodexTokenStorage {
+	claims := `{"https://api.openai.com/auth":{"chatgpt_account_id":"` + id + `"}}`
+	return &CodexTokenStorage{
+		AccountID:    id,
+		IDToken:      "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature",
+		AccessToken:  "access-" + id,
+		RefreshToken: "refresh-" + id,
+	}
+}
+
+func TestSaveNewAccountTokenToDirFencesIdentityAndLegacyFilenames(t *testing.T) {
+	root := privateTempDir(t)
+	first := newEnrollmentStorage("account-a")
+	if _, err := first.SaveNewAccountTokenToDir(root, "account-b"); err == nil {
+		t.Fatal("mismatched expected account admitted")
+	}
+	first.Metadata = map[string]any{"account_id": "account-b"}
+	if _, err := first.SaveNewAccountTokenToDir(root, "account-a"); err == nil {
+		t.Fatal("metadata overrode checked identity")
+	}
+	first.Metadata = nil
+	path, err := first.SaveNewAccountTokenToDir(root, "account-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(path), "codex-account-") || strings.Contains(path, "account-a") {
+		t.Fatal("account identity leaked through generated filename")
+	}
+	if _, err := newEnrollmentStorage("account-b").SaveNewAccountTokenToDir(root, "account-b"); err != nil {
+		t.Fatal("independent account was blocked by prior scan: ", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newEnrollmentStorage("account-a").SaveNewAccountTokenToDir(root, "account-a"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatal("duplicate identity under generated filename was admitted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("duplicate identity changed existing credential")
+	}
+
+	legacy := filepath.Join(privateTempDir(t), "codex-old-email-and-plan.json")
+	if err := newEnrollmentStorage("legacy-account").SaveTokenToFile(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newEnrollmentStorage("legacy-account").SaveNewAccountTokenToDir(filepath.Dir(legacy), "legacy-account"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatal("duplicate identity under legacy email filename was admitted")
+	}
+}
+
+func TestSaveNewAccountTokenToDirRejectsUnsafeInventory(t *testing.T) {
+	for _, name := range []string{"malformed", "symlink", "identity-conflict", "orphan-temp"} {
+		t.Run(name, func(t *testing.T) {
+			root := privateTempDir(t)
+			path := filepath.Join(root, "old.json")
+			if name == "malformed" {
+				if err := os.WriteFile(path, []byte("PRIVATE-MALFORMED"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if name == "orphan-temp" {
+				if err := os.WriteFile(filepath.Join(root, ".codex-private.tmp"), []byte("PRIVATE-ORPHANED-TOKEN"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if name == "symlink" {
+				if err := os.Symlink(filepath.Join(root, "absent"), path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				storage := newEnrollmentStorage("one-identity")
+				storage.AccountID = "another-identity"
+				if err := storage.SaveTokenToFile(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := newEnrollmentStorage("fresh-account").SaveNewAccountTokenToDir(root, "fresh-account"); err == nil || strings.Contains(err.Error(), "PRIVATE-MALFORMED") || strings.Contains(err.Error(), "PRIVATE-ORPHANED-TOKEN") || strings.Contains(err.Error(), "old.json") {
+				t.Fatal("unsafe inventory was skipped or leaked")
+			}
+		})
+	}
+}
+
+func TestSaveNewAccountTokenToDirPostCommitUncertaintyCannotCreateSecondFamily(t *testing.T) {
+	root := privateTempDir(t)
+	previous := syncTokenParent
+	syncTokenParent = func(int) error { return unix.EIO }
+	defer func() { syncTokenParent = previous }()
+	path, err := newEnrollmentStorage("uncertain-account").SaveNewAccountTokenToDir(root, "uncertain-account")
+	if !errors.Is(err, ErrTokenCommitDurabilityUncertain) {
+		t.Fatal("visible new credential lost its durability-uncertain signal")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("post-commit error falsely removed the visible credential")
+	}
+	if _, err := newEnrollmentStorage("uncertain-account").SaveNewAccountTokenToDir(root, "uncertain-account"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatal("second authorization was admitted after uncertain visible commit")
 	}
 }
 

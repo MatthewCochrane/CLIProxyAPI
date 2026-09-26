@@ -26,6 +26,21 @@ func TestNewCodexAuthDoesNotSetRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestCodexAuthorizationExchangeBoundsProviderBody(t *testing.T) {
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(strings.NewReader(strings.Repeat("PRIVATE-PROVIDER-BODY", 4096))),
+			Header:     make(http.Header),
+			Request:    request,
+		}, nil
+	})}}
+	_, err := auth.ExchangeCodeForTokensWithRedirect(context.Background(), "private-code", "https://auth.openai.com/deviceauth/callback", &PKCECodes{CodeVerifier: "private-verifier"})
+	if err == nil || !strings.Contains(err.Error(), "size limit") || strings.Contains(err.Error(), "PRIVATE-PROVIDER-BODY") {
+		t.Fatal("oversized authorization response was not rejected without its body")
+	}
+}
+
 func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 	resetCodexRefreshGroupForTest()
 	defer resetCodexRefreshGroupForTest()

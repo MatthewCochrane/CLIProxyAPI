@@ -114,6 +114,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
+	if s.controlAuthDir != "" && newCfg.AuthDir != s.controlAuthDir {
+		log.Warn("rejected config update changing private enrollment auth directory")
+		return configCommit{}
+	}
 	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}

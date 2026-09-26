@@ -129,9 +129,12 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
+	}
+	if len(body) > 64<<10 {
+		return nil, fmt.Errorf("token response exceeded size limit")
 	}
 	// log.Debugf("Token response: %s", string(body))
 
@@ -155,7 +158,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	// Extract account ID from ID token
 	claims, err := ParseJWTToken(tokenResp.IDToken)
 	if err != nil {
-		log.Warnf("Failed to parse ID token: %v", err)
+		log.Warn("Failed to parse ID token")
 	}
 
 	accountID := ""

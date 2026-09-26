@@ -20,6 +20,7 @@ import (
 // CodexAuthenticator implements the OAuth login flow for Codex accounts.
 type CodexAuthenticator struct {
 	CallbackPort int
+	deviceClient *http.Client
 }
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.
@@ -44,6 +45,9 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 	if opts == nil {
 		opts = &LoginOptions{}
+	}
+	if opts.OnCodexDeviceCode != nil && !shouldUseCodexDeviceFlow(opts) {
+		return nil, fmt.Errorf("private Codex challenge requires device authorization")
 	}
 
 	if shouldUseCodexDeviceFlow(opts) {
@@ -194,5 +198,5 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(authSvc, authBundle, true)
 }
