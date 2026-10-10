@@ -19,14 +19,16 @@ const (
 	controlEnrollmentEnv = "CLIPROXY_CONTROL_ENROLLMENT_ENABLED"
 	controlKeysEnv       = "CLIPROXY_CONTROL_KEYS_ENABLED"
 	controlKeyStoreEnv   = "CLIPROXY_CONTROL_KEY_STORE_DIR"
+	sharedInferenceEnv   = "CLIPROXY_SHARED_KEYS_ENABLED"
 )
 
 type controlConfig struct {
-	addr        string
-	token       string
-	enrollment  bool
-	keys        bool
-	keyStoreDir string
+	addr            string
+	token           string
+	enrollment      bool
+	keys            bool
+	keyStoreDir     string
+	sharedInference bool
 }
 
 func loadControlConfig(lookup func(string) (string, bool), routing *routingObservabilityConfig) (*controlConfig, error) {
@@ -35,6 +37,13 @@ func loadControlConfig(lookup func(string) (string, bool), routing *routingObser
 	enrollment, hasEnrollment := lookup(controlEnrollmentEnv)
 	keys, hasKeys := lookup(controlKeysEnv)
 	keyDir, hasKeyDir := lookup(controlKeyStoreEnv)
+	shared, hasShared := lookup(sharedInferenceEnv)
+	if hasShared && shared != "true" && shared != "false" {
+		return nil, fmt.Errorf("shared inference flag must be true or false")
+	}
+	if shared == "true" && (!hasAddr || !hasToken) {
+		return nil, fmt.Errorf("shared inference requires the reviewed private control configuration")
+	}
 	if hasEnrollment && enrollment != "true" && enrollment != "false" {
 		return nil, fmt.Errorf("private enrollment flag must be true or false")
 	}
@@ -63,7 +72,7 @@ func loadControlConfig(lookup func(string) (string, bool), routing *routingObser
 	if ip == nil || !ip.IsLoopback() || err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("private control address must be a literal loopback IP and nonzero port")
 	}
-	return &controlConfig{addr: addr, token: token, enrollment: enrollment == "true", keys: keys == "true", keyStoreDir: keyDir}, nil
+	return &controlConfig{addr: addr, token: token, enrollment: enrollment == "true", keys: keys == "true", keyStoreDir: keyDir, sharedInference: shared == "true"}, nil
 }
 
 func newControlServer(observer *routingobs.Observer, token string, enrollment ...http.Handler) *http.Server {

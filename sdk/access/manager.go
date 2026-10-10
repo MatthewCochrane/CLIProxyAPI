@@ -2,6 +2,9 @@ package access
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +15,48 @@ type Manager struct {
 	mu                     sync.RWMutex
 	providers              []Provider
 	environmentKeyVerifier func(string) (string, bool)
+	sharedInferenceDigests [][32]byte
+	sharedForbiddenDigests [][32]byte
+	sharedInferenceEnabled bool
+}
+
+// SetSharedInferenceKeys explicitly admits configured shared inference keys.
+// It never delegates to permissive plugin providers or admits managed-prefix
+// keys through this path. Empty configuration removes shared access.
+func (m *Manager) SetSharedInferenceKeys(keys []string, forbidden ...string) error {
+	if m == nil {
+		return fmt.Errorf("shared inference admission is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	blocked := append([][32]byte(nil), m.sharedForbiddenDigests...)
+	for _, key := range forbidden {
+		if key != "" {
+			blocked = append(blocked, sha256.Sum256([]byte(key)))
+		}
+	}
+	digests := make([][32]byte, 0, len(keys))
+	for _, key := range keys {
+		if len(key) < 16 || len(key) > 4096 || strings.Contains(key, EnvironmentKeyPrefix) {
+			return fmt.Errorf("invalid shared inference credential configuration")
+		}
+		for _, char := range key {
+			if char < 33 || char > 126 {
+				return fmt.Errorf("invalid shared inference credential configuration")
+			}
+		}
+		digest := sha256.Sum256([]byte(key))
+		for _, deny := range blocked {
+			if subtle.ConstantTimeCompare(digest[:], deny[:]) == 1 {
+				return fmt.Errorf("shared inference and control credentials must be independent")
+			}
+		}
+		digests = append(digests, digest)
+	}
+	m.sharedInferenceDigests = digests
+	m.sharedForbiddenDigests = blocked
+	m.sharedInferenceEnabled = true
+	return nil
 }
 
 // SetEnvironmentKeyVerifier installs the dedicated inference-only credential
@@ -72,6 +117,8 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 	m.mu.RLock()
 	providers := append([]Provider(nil), m.providers...)
 	verify := m.environmentKeyVerifier
+	shared := append([][32]byte(nil), m.sharedInferenceDigests...)
+	sharedEnabled := m.sharedInferenceEnabled
 	m.mu.RUnlock()
 	if r != nil {
 		authorization := r.Header.Get("Authorization")
@@ -104,11 +151,31 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 			}
 			return nil, NewInvalidCredentialError()
 		}
+		if len(shared) > 0 {
+			const bearer = "Bearer "
+			if len(r.Header.Values("Authorization")) != 1 || len(authorization) < len(bearer) || !strings.EqualFold(authorization[:len(bearer)], bearer) {
+				return nil, NewInvalidCredentialError()
+			}
+			for _, value := range other {
+				if value != "" {
+					return nil, NewInvalidCredentialError()
+				}
+			}
+			digest := sha256.Sum256([]byte(authorization[len(bearer):]))
+			matched := 0
+			for _, expected := range shared {
+				matched |= subtle.ConstantTimeCompare(digest[:], expected[:])
+			}
+			if matched == 1 {
+				return &Result{Provider: "shared-inference-key", Principal: "shared-pool"}, nil
+			}
+			return nil, NewInvalidCredentialError()
+		}
 	}
-	// Activating dedicated environment keys replaces, rather than augments,
-	// shared legacy inference keys. A pilot's general api-key must not bypass
-	// an environment revocation when production admission is enabled.
-	if verify != nil {
+	// Dedicated environment admission denies legacy/plugin fallback. Only the
+	// separately configured shared snapshot above can coexist; a revoked managed
+	// credential can never be interpreted as a shared or plugin credential.
+	if verify != nil || sharedEnabled {
 		return nil, NewNoCredentialsError()
 	}
 	if len(providers) == 0 {

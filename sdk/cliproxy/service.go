@@ -95,7 +95,8 @@ type Service struct {
 	authManager *sdkAuth.Manager
 
 	// accessManager handles request authentication providers.
-	accessManager *sdkaccess.Manager
+	accessManager              *sdkaccess.Manager
+	sharedInferenceKeysEnabled bool
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager

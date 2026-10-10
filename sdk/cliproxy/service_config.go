@@ -122,6 +122,12 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
+	if s.sharedInferenceKeysEnabled {
+		if err := s.accessManager.SetSharedInferenceKeys(newCfg.APIKeys); err != nil {
+			log.Warn("rejected invalid shared inference credential configuration")
+			return configCommit{}
+		}
+	}
 
 	s.cfgMu.Lock()
 	s.cfg = newCfg

@@ -76,3 +76,40 @@ func TestPrivateInferenceAdmissionSurvivesProviderAndConfigReload(t *testing.T) 
 	}
 	check(false)
 }
+
+func TestExplicitSharedInferenceReloadAndControlSeparation(t *testing.T) {
+	manager := sdkaccess.NewManager()
+	first, second, control := "unissued-first-shared-fixture", "unissued-second-shared-fixture", "unissued-private-control-fixture"
+	initial := &config.Config{AuthDir: "/private/auth"}
+	initial.APIKeys = []string{first}
+	service := &Service{cfg: initial, accessManager: manager}
+	if err := service.EnableSharedInferenceKeys(control); err != nil {
+		t.Fatal(err)
+	}
+	accepted := func(key string) bool {
+		request, _ := http.NewRequest(http.MethodGet, "http://localhost/v1/models", nil)
+		request.Header.Set("Authorization", "Bearer "+key)
+		result, err := manager.Authenticate(context.Background(), request)
+		return err == nil && result != nil && result.Provider == "shared-inference-key"
+	}
+	if !accepted(first) || accepted(control) {
+		t.Fatal("incorrect initial shared admission")
+	}
+	bad := &config.Config{AuthDir: "/private/auth"}
+	bad.APIKeys = []string{control}
+	if service.commitConfigUpdate(bad).cfg != nil || !accepted(first) {
+		t.Fatal("control credential reload must reject without changing admission")
+	}
+	replacement := &config.Config{AuthDir: "/private/auth"}
+	replacement.APIKeys = []string{second}
+	if service.commitConfigUpdate(replacement).cfg == nil || accepted(first) || !accepted(second) {
+		t.Fatal("shared rotation did not replace the admission snapshot")
+	}
+	manager.SetProviders(sdkaccess.RegisteredProviders())
+	if !accepted(second) {
+		t.Fatal("ordinary provider reload erased explicit shared admission")
+	}
+	if service.commitConfigUpdate(&config.Config{AuthDir: "/private/auth"}).cfg == nil || accepted(second) {
+		t.Fatal("empty reload must remove shared admission")
+	}
+}

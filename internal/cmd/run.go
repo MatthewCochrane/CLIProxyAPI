@@ -48,6 +48,8 @@ type routingObservabilityRuntime struct {
 	controlListener net.Listener
 	enrollment      *enrollmentController
 	keyStore        *sdkaccess.EnvironmentKeyStore
+	sharedInference bool
+	sharedForbidden []string
 	keyAuthDir      string
 	controlServer   *http.Server
 }
@@ -113,6 +115,20 @@ func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObser
 	}
 	runtime := &routingObservabilityRuntime{listener: listener, server: server, observer: observer}
 	if control != nil {
+		runtime.sharedInference = control.sharedInference
+		runtime.sharedForbidden = []string{control.token, cfg.token, string(cfg.hmacKey)}
+		if control.sharedInference {
+			if serviceConfig == nil || len(serviceConfig.APIKeys) == 0 {
+				runtime.close()
+				return nil, fmt.Errorf("shared inference credentials are not configured")
+			}
+			for _, key := range serviceConfig.APIKeys {
+				if key == control.token || key == cfg.token || key == string(cfg.hmacKey) {
+					runtime.close()
+					return nil, fmt.Errorf("shared inference and control credentials must be independent")
+				}
+			}
+		}
 		if control.keys {
 			if serviceConfig == nil || !filepath.IsAbs(serviceConfig.AuthDir) ||
 				pathContains(control.keyStoreDir, serviceConfig.AuthDir) || pathContains(serviceConfig.AuthDir, control.keyStoreDir) {
@@ -284,6 +300,12 @@ func newServiceBuilder(cfg *config.Config, configPath, localPassword string, hos
 }
 
 func runService(ctx context.Context, service *cliproxy.Service, runtime *routingObservabilityRuntime) error {
+	if runtime != nil && runtime.sharedInference {
+		if err := service.EnableSharedInferenceKeys(runtime.sharedForbidden...); err != nil {
+			runtime.close()
+			return err
+		}
+	}
 	if runtime != nil && runtime.keyStore != nil {
 		if err := service.PinControlAuthDir(runtime.keyAuthDir); err != nil {
 			runtime.close()
