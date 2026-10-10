@@ -137,6 +137,49 @@ func TestEnvironmentKeyUncertaintyAndTamperingFailClosed(t *testing.T) {
 	}
 }
 
+func TestEnvironmentKeyRetiredGenerationsRemainReadableAfterRestart(t *testing.T) {
+	dir, store := privateKeyStore(t)
+	first, _ := GenerateEnvironmentKey()
+	second, _ := GenerateEnvironmentKey()
+	for index, key := range []string{first, second} {
+		issued := uint64(index*2 + 1)
+		if revision, err := store.Issue("environment-A", key); err != nil || revision != issued {
+			t.Fatalf("issue: %d, %v", revision, err)
+		}
+		if err := store.Revoke("environment-A", issued); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(filepath.Join(dir, environmentKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewEnvironmentKeyStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if revision, active, present, err := reopened.Inspect("environment-A"); err != nil || revision != 4 || active || !present {
+		t.Fatalf("retirement history: %d, %v, %v, %v", revision, active, present, err)
+	}
+	for _, key := range []string{first, second} {
+		if _, ok := reopened.Verify(key); ok {
+			t.Fatal("retired credential accepted")
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(dir, environmentKeyFile))
+	if err != nil || string(after) != string(before) {
+		t.Fatal("read-only restart rewrote the ledger")
+	}
+	third, _ := GenerateEnvironmentKey()
+	if revision, err := reopened.Issue("environment-A", third); err != nil || revision != 5 {
+		t.Fatalf("next generation: %d, %v", revision, err)
+	}
+}
+
 func TestEnvironmentKeyMalformedOrLinkedAuthorityFailsClosed(t *testing.T) {
 	dir, store := privateKeyStore(t)
 	key, _ := GenerateEnvironmentKey()

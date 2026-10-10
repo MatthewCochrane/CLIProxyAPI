@@ -183,8 +183,17 @@ func (s *EnvironmentKeyStore) read() (environmentKeyFileData, error) {
 		if !ValidEnvironmentID(row.Environment) || len(row.Digest) != 64 || digestErr != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != row.Digest || row.Revision == 0 || seenDigest[row.Digest] {
 			return result, ErrEnvironmentKeyUnavailable
 		}
-		if prior, exists := seenEnv[row.Environment]; exists && (!prior.Revoked || prior.Revision == ^uint64(0) || row.Revision != prior.Revision+1) {
-			return result, ErrEnvironmentKeyUnavailable
+		if prior, exists := seenEnv[row.Environment]; exists {
+			// Revoke advances the revision in the existing row. Compare the next
+			// row's issuance revision, not its later retirement revision: a valid
+			// issue/revoke/reissue/revoke history is [2 revoked, 4 revoked].
+			issuedRevision := row.Revision
+			if row.Revoked {
+				issuedRevision--
+			}
+			if !prior.Revoked || prior.Revision == ^uint64(0) || issuedRevision != prior.Revision+1 {
+				return result, ErrEnvironmentKeyUnavailable
+			}
 		}
 		seenEnv[row.Environment], seenDigest[row.Digest] = row, true
 	}
