@@ -47,6 +47,7 @@ type routingObservabilityRuntime struct {
 	observer        *routingobs.Observer
 	controlListener net.Listener
 	enrollment      *enrollmentController
+	accounts        *accountController
 	keyStore        *sdkaccess.EnvironmentKeyStore
 	sharedInference bool
 	sharedForbidden []string
@@ -157,7 +158,7 @@ func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObser
 			}
 			runtime.keyAuthDir = serviceConfig.AuthDir
 		}
-		if control.enrollment {
+		if control.enrollment || control.accounts {
 			if serviceConfig == nil || !filepath.IsAbs(serviceConfig.AuthDir) {
 				runtime.close()
 				return nil, fmt.Errorf("private enrollment requires an absolute existing auth directory")
@@ -177,7 +178,12 @@ func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObser
 					break
 				}
 			}
-			runtime.enrollment = newEnrollmentController(serviceConfig)
+			if control.enrollment {
+				runtime.enrollment = newEnrollmentController(serviceConfig)
+			}
+			if control.accounts {
+				runtime.accounts = newAccountController(serviceConfig)
+			}
 		}
 		runtime.controlListener, err = net.Listen("tcp", control.addr)
 		if err != nil {
@@ -191,8 +197,12 @@ func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObser
 		if runtime.keyStore != nil {
 			keyHandler = http.HandlerFunc((&environmentKeyController{store: runtime.keyStore}).handle)
 		}
-		if enrollmentHandler != nil || keyHandler != nil {
-			runtime.controlServer = newControlServerWithKeys(observer, control.token, enrollmentHandler, keyHandler)
+		if enrollmentHandler != nil || keyHandler != nil || runtime.accounts != nil {
+			var accounts http.Handler
+			if runtime.accounts != nil {
+				accounts = http.HandlerFunc(runtime.accounts.handle)
+			}
+			runtime.controlServer = newControlServerWithKeys(observer, control.token, enrollmentHandler, keyHandler, accounts)
 		} else {
 			runtime.controlServer = newControlServer(observer, control.token)
 		}
@@ -206,6 +216,9 @@ func pathContains(parent, child string) bool {
 }
 
 func (r *routingObservabilityRuntime) close() {
+	if r != nil && r.accounts != nil {
+		r.accounts.close()
+	}
 	if r != nil && r.enrollment != nil {
 		r.enrollment.close()
 	}
@@ -324,6 +337,14 @@ func runService(ctx context.Context, service *cliproxy.Service, runtime *routing
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
+	if runtime != nil && runtime.accounts != nil {
+		if err := service.PinControlAuthDir(runtime.accounts.authDir); err != nil {
+			runtime.close()
+			return err
+		}
+		runtime.accounts.bindService(runCtx, service)
+		defer runtime.accounts.close()
+	}
 	var observabilityDone <-chan error
 	if runtime != nil {
 		observabilityDone = runtime.start(runCtx, runCancel)

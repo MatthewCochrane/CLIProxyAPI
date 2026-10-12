@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	ControlHealthPath     = "/v1/control/health"
-	ControlStatePath      = "/v1/control/state"
-	ControlEnrollmentPath = "/v1/control/enrollments"
-	ControlKeysPath       = "/v1/control/keys"
+	ControlHealthPath                = "/v1/control/health"
+	ControlStatePath                 = "/v1/control/state"
+	ControlEnrollmentPath            = "/v1/control/enrollments"
+	ControlKeysPath                  = "/v1/control/keys"
+	ControlAccountsPath              = "/v1/control/accounts"
+	ControlAccountAuthorizationsPath = "/v1/control/account-authorizations"
 )
 
 // ControlHandler exposes only the read-only, credential-free portion of the
@@ -34,6 +36,10 @@ func (o *Observer) ControlHandlerWithEnrollment(token string, enrollment http.Ha
 // ControlHandlerWithMutations routes only explicitly supplied private handlers
 // after the same independent bearer and literal-loopback checks as reads.
 func (o *Observer) ControlHandlerWithMutations(token string, enrollment, keys http.Handler) http.Handler {
+	return o.ControlHandlerWithAccounts(token, enrollment, keys, nil)
+}
+
+func (o *Observer) ControlHandlerWithAccounts(token string, enrollment, keys, accounts http.Handler) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Binding to loopback is not sufficient when a reverse proxy can connect
@@ -55,6 +61,10 @@ func (o *Observer) ControlHandlerWithMutations(token string, enrollment, keys ht
 		}
 		if keys != nil && (r.URL.Path == ControlKeysPath || strings.HasPrefix(r.URL.Path, ControlKeysPath+"/")) {
 			keys.ServeHTTP(w, r)
+			return
+		}
+		if accounts != nil && (r.URL.Path == ControlAccountsPath || strings.HasPrefix(r.URL.Path, ControlAccountsPath+"/") || r.URL.Path == ControlAccountAuthorizationsPath || strings.HasPrefix(r.URL.Path, ControlAccountAuthorizationsPath+"/")) {
+			accounts.ServeHTTP(w, r)
 			return
 		}
 		if r.URL.Path != ControlHealthPath && r.URL.Path != ControlStatePath {

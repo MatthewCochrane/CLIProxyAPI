@@ -20,6 +20,7 @@ const (
 	controlKeysEnv       = "CLIPROXY_CONTROL_KEYS_ENABLED"
 	controlKeyStoreEnv   = "CLIPROXY_CONTROL_KEY_STORE_DIR"
 	sharedInferenceEnv   = "CLIPROXY_SHARED_KEYS_ENABLED"
+	controlAccountsEnv   = "CLIPROXY_CONTROL_ACCOUNTS_ENABLED"
 )
 
 type controlConfig struct {
@@ -29,6 +30,7 @@ type controlConfig struct {
 	keys            bool
 	keyStoreDir     string
 	sharedInference bool
+	accounts        bool
 }
 
 func loadControlConfig(lookup func(string) (string, bool), routing *routingObservabilityConfig) (*controlConfig, error) {
@@ -38,6 +40,13 @@ func loadControlConfig(lookup func(string) (string, bool), routing *routingObser
 	keys, hasKeys := lookup(controlKeysEnv)
 	keyDir, hasKeyDir := lookup(controlKeyStoreEnv)
 	shared, hasShared := lookup(sharedInferenceEnv)
+	accounts, hasAccounts := lookup(controlAccountsEnv)
+	if hasAccounts && accounts != "true" && accounts != "false" {
+		return nil, fmt.Errorf("private accounts flag must be true or false")
+	}
+	if accounts == "true" && (!hasAddr || !hasToken) {
+		return nil, fmt.Errorf("private accounts require independent control listener")
+	}
 	if hasShared && shared != "true" && shared != "false" {
 		return nil, fmt.Errorf("shared inference flag must be true or false")
 	}
@@ -72,7 +81,7 @@ func loadControlConfig(lookup func(string) (string, bool), routing *routingObser
 	if ip == nil || !ip.IsLoopback() || err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("private control address must be a literal loopback IP and nonzero port")
 	}
-	return &controlConfig{addr: addr, token: token, enrollment: enrollment == "true", keys: keys == "true", keyStoreDir: keyDir, sharedInference: shared == "true"}, nil
+	return &controlConfig{addr: addr, token: token, enrollment: enrollment == "true", keys: keys == "true", keyStoreDir: keyDir, sharedInference: shared == "true", accounts: accounts == "true"}, nil
 }
 
 func newControlServer(observer *routingobs.Observer, token string, enrollment ...http.Handler) *http.Server {
@@ -83,10 +92,13 @@ func newControlServer(observer *routingobs.Observer, token string, enrollment ..
 	return newControlServerWithKeys(observer, token, enroll, nil)
 }
 
-func newControlServerWithKeys(observer *routingobs.Observer, token string, enrollment, keys http.Handler) *http.Server {
+func newControlServerWithKeys(observer *routingobs.Observer, token string, enrollment, keys http.Handler, accounts ...http.Handler) *http.Server {
 	handler := observer.ControlHandler(token)
 	if enrollment != nil || keys != nil {
 		handler = observer.ControlHandlerWithMutations(token, enrollment, keys)
+	}
+	if len(accounts) == 1 && accounts[0] != nil {
+		handler = observer.ControlHandlerWithAccounts(token, enrollment, keys, accounts[0])
 	}
 	return &http.Server{
 		Handler:           handler,

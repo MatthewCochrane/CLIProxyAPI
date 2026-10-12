@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,22 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if !ok || existing == nil {
 		m.mu.Unlock()
 		return nil, nil
+	}
+	// Watcher snapshots have generation zero. A queued older file observation
+	// must not undo a durable account-control mutation or retired credential.
+	if mode == updateModeReplace && existing.Provider == "codex" && existing.Metadata[AccountRevisionKey] != nil {
+		currentRevision, currentErr := AccountRevision(existing)
+		incomingRevision, incomingErr := AccountRevision(auth)
+		if currentErr != nil || incomingErr != nil || incomingRevision != currentRevision || CredentialsChanged(existing, auth) {
+			m.mu.Unlock()
+			return nil, ErrAccountConflict
+		}
+		for _, key := range []string{AccountIncludedKey, AccountAuthorizationKey, AccountRetiredKey, AccountOperationKey, accountExpectedKey, accountActionKey} {
+			if !reflect.DeepEqual(existing.Metadata[key], auth.Metadata[key]) {
+				m.mu.Unlock()
+				return nil, ErrAccountConflict
+			}
+		}
 	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)

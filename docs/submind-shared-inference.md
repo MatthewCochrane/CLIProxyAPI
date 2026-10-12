@@ -21,3 +21,44 @@ existing deployments retain their previous authentication behavior.
 The explicit flag requires the reviewed private control/observer configuration.
 Do not put control credentials in inference clients or expose the private
 control listener through the inference endpoint.
+
+## Optional private account controls
+
+`CLIPROXY_CONTROL_ACCOUNTS_ENABLED=true` enables account controls on that same
+independently authenticated literal-loopback listener. It is off by default and
+requires the reviewed control/observer roles plus an owned private auth directory.
+The inference credential never grants control access. Origin, Cookie, non-loopback
+and incorrect control-bearer requests are refused before account admission.
+
+- `GET /v1/control/accounts` returns public hashed identity, email, authorization,
+  desired inclusion, routing availability and revision for persistent Codex
+  accounts. It never returns filenames or credentials.
+- `POST /v1/control/accounts/:id/membership` takes `operationId`,
+  `expectedRevision` and `included`. `POST .../:id/retire` takes the first two.
+  Account IDs are 64 lowercase hexadecimal characters; operation IDs are 32.
+  Missing or null revisions are invalid. The existing atomic token writer saves
+  membership before runtime publication and synchronous model updates.
+- `POST /v1/control/account-authorizations` takes `attemptId`, `targetId` and
+  `expectedRevision`. New identity uses an empty target and revision zero.
+  `GET` and `DELETE .../:attemptId` observe and cancel the same attempt. New
+  accounts start excluded; targeted reauthorization preserves inclusion and
+  rejects a different provider identity without replacing credentials.
+
+Unknown replies use the same operation, not invented success or another OAuth.
+Cancellation of an unknown attempt persists a tombstone before acknowledgment.
+Pending OAuth expires on restart; uncertain commits reconcile against their
+persisted operation. Challenges are transient. Private `.receipt` files hold
+narrow operation receipts and are ignored by the auth JSON loader. Limits are
+eight active and 1024 retained authorization attempts, with a 15-minute
+credential-acquisition deadline.
+
+Remove membership affects future selection and refresh, not active requests or
+provider revocation. Retirement keeps an excluded tombstone; fresh authorization
+of that identity reuses one owner and starts excluded. Reauthorization fences late
+old refreshes. Equal-revision stale watcher snapshots cannot restore old tokens
+or control fields. Unrelated accounts and inference/key/observer roles retain
+their behavior.
+
+Submind's `POOLED_CODEX_ACCOUNTS_ENABLED` and existing server-side control URL/token
+provide the UI gateway. Legacy credentials, enrollment and assignment are not
+prerequisites. No browser receives the private bearer or upstream tokens.

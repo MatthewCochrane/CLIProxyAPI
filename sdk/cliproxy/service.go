@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -99,7 +100,8 @@ type Service struct {
 	sharedInferenceKeysEnabled bool
 
 	// coreManager handles core authentication and execution.
-	coreManager *coreauth.Manager
+	coreManager         *coreauth.Manager
+	accountControlReady atomic.Bool
 
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore

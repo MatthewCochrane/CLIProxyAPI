@@ -120,3 +120,48 @@ func TestEnrollmentMutationIsAbsentByDefaultAndUsesCommonAdmission(t *testing.T)
 		t.Fatalf("enrollment callback reached %d times, want once", called)
 	}
 }
+
+func TestAccountControlsUsePrivateAdmissionAndAreAbsentByDefault(t *testing.T) {
+	observer := NewObserver([]byte(strings.Repeat("h", 32)), 24)
+	secret := strings.Repeat("c", 32)
+	for _, path := range []string{ControlAccountsPath, ControlAccountAuthorizationsPath} {
+		called := 0
+		accountHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called++; w.WriteHeader(202) })
+		for _, tc := range []struct {
+			name, remote, bearer, origin, cookie string
+			enabled                              bool
+			want                                 int
+		}{
+			{"default off", "127.0.0.1:1234", secret, "", "", false, 404},
+			{"remote", "100.64.1.1:1234", secret, "", "", true, 404},
+			{"wrong bearer", "127.0.0.1:1234", "wrong", "", "", true, 401},
+			{"browser origin", "127.0.0.1:1234", secret, "https://example.test", "", true, 401},
+			{"browser cookie", "127.0.0.1:1234", secret, "", "session=1", true, 401},
+			{"local authenticated", "127.0.0.1:1234", secret, "", "", true, 202},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				request := httptest.NewRequest("GET", path, nil)
+				request.RemoteAddr = tc.remote
+				request.Header.Set("Authorization", "Bearer "+tc.bearer)
+				if tc.origin != "" {
+					request.Header.Set("Origin", tc.origin)
+				}
+				if tc.cookie != "" {
+					request.Header.Set("Cookie", tc.cookie)
+				}
+				handler := observer.ControlHandler(secret)
+				if tc.enabled {
+					handler = observer.ControlHandlerWithAccounts(secret, nil, nil, accountHandler)
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != tc.want {
+					t.Fatalf("status %d want %d", response.Code, tc.want)
+				}
+			})
+		}
+		if called != 1 {
+			t.Fatal("account callback admitted unqualified caller")
+		}
+	}
+}
