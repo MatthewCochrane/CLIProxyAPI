@@ -27,6 +27,10 @@ func TestPrivateAccountUsageNormalizationAndIsolation(t *testing.T) {
 	if err != nil || len(quota.Windows) != 1 || quota.Windows[0].Category != "seven_day" || *quota.Windows[0].UsedPercent != 21 {
 		t.Fatalf("wrong genuine window: %v", err)
 	}
+	monthly, err := normalizeAccountUsage([]byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":2592000,"reset_at":1792478964},"secondary_window":null}}`), now)
+	if err != nil || len(monthly.Windows) != 1 || monthly.Windows[0].Category != "primary" || *monthly.Windows[0].WindowMinutes != 43200 || *monthly.Windows[0].UsedPercent != 1 {
+		t.Fatalf("Free account's reported 30-day window was lost or relabeled: %v", err)
+	}
 	for _, bad := range []string{`{}`, `{"rate_limit":{"primary_window":{"used_percent":120,"limit_window_seconds":18000}}}`, `{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000},"secondary_window":{"used_percent":30,"limit_window_seconds":18000}}}`} {
 		if _, err := normalizeAccountUsage([]byte(bad), now); err == nil {
 			t.Fatal("accepted absent, invalid or ambiguous quota")

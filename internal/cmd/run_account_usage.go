@@ -95,7 +95,7 @@ func normalizeAccountUsage(body []byte, now time.Time) (routingobs.QuotaSnapshot
 		if json.Unmarshal(candidate, &value) != nil {
 			return routingobs.QuotaSnapshot{}, errUsageUnavailable
 		}
-		if value.Duration == nil || (*value.Duration != 18000 && *value.Duration != 604800) {
+		if value.Duration == nil || (*value.Duration != 18000 && *value.Duration != 604800 && *value.Duration != 2592000) {
 			continue
 		}
 		if seen[*value.Duration] || value.Used == nil || math.IsNaN(*value.Used) || math.IsInf(*value.Used, 0) || *value.Used < 0 || *value.Used > 100 {
@@ -106,6 +106,8 @@ func normalizeAccountUsage(body []byte, now time.Time) (routingobs.QuotaSnapshot
 		category := "five_hour"
 		if minutes == 10080 {
 			category = "seven_day"
+		} else if minutes == 43200 {
+			category = "primary"
 		}
 		var reset *time.Time
 		if value.ResetAt != nil {
