@@ -16,6 +16,13 @@ func (s *Service) ControlledAccounts() ([]*coreauth.Auth, error) {
 	return s.coreManager.List(), nil
 }
 
+func (s *Service) ControlledUsageCredential(ctx context.Context, id string, epoch uint64, failedToken string) (*coreauth.Auth, error) {
+	if _, err := s.ControlledAccounts(); err != nil {
+		return nil, err
+	}
+	return s.coreManager.UsageCredential(ctx, id, epoch, failedToken)
+}
+
 func (s *Service) SetControlledMembership(ctx context.Context, id, operation string, expected uint64, included bool) (*coreauth.Auth, error) {
 	if _, err := s.ControlledAccounts(); err != nil {
 		return nil, err

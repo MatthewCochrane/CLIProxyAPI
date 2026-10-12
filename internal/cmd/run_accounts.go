@@ -61,10 +61,11 @@ type accountController struct {
 	attempts       map[string]*accountAttempt
 	loaded, closed bool
 	observer       *routingobs.Observer
+	readUsage      func(context.Context, *coreauth.Auth) (routingobs.QuotaSnapshot, error)
 }
 
 func newAccountController(cfg *config.Config) *accountController {
-	return &accountController{authDir: cfg.AuthDir, dir: filepath.Join(cfg.AuthDir, ".submind-account-operations"), login: newEnrollmentController(cfg).login, attempts: make(map[string]*accountAttempt)}
+	return &accountController{authDir: cfg.AuthDir, dir: filepath.Join(cfg.AuthDir, ".submind-account-operations"), login: newEnrollmentController(cfg).login, attempts: make(map[string]*accountAttempt), readUsage: newAccountUsageReader(cfg)}
 }
 
 func (c *accountController) bindService(ctx context.Context, service *cliproxy.Service) {
@@ -242,6 +243,10 @@ func (c *accountController) reconcile(a *accountAttempt, values []*coreauth.Auth
 }
 
 func (c *accountController) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, routingobs.ControlAccountsPath+"/") && strings.HasSuffix(r.URL.Path, "/usage") {
+		c.checkAccountUsage(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.RawQuery != "" || r.URL.ForceQuery {

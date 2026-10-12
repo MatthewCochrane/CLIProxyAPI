@@ -52,7 +52,7 @@ narrow operation receipts and are ignored by the auth JSON loader. Limits are
 eight active and 1024 retained authorization attempts, with a 15-minute
 credential-acquisition deadline.
 
-Remove membership affects future selection and refresh, not active requests or
+Remove membership affects future selection and inference-driven refresh, not active requests or
 provider revocation. Retirement keeps an excluded tombstone; fresh authorization
 of that identity reuses one owner and starts excluded. Reauthorization fences late
 old refreshes. Equal-revision stale watcher snapshots cannot restore old tokens
@@ -81,3 +81,11 @@ payment date. Quota freshness and reset timing are observations, not proof that
 an account can use every model. Reading this endpoint does not make an inference
 request, refresh a token or change membership. It retains the same literal
 loopback, independent control bearer and browser-origin/cookie rejection gates.
+
+## Live account usage reads
+
+The optional private account role also supports `POST /v1/control/accounts/:id/usage` with an empty JSON object. The existing literal-loopback, independent bearer and browser-Origin/Cookie refusal apply. The public 64-hex account ID selects an existing persistent, non-retired Codex owner; included and excluded authorized accounts can both be checked. No inference request, routing-membership change or browser credential export occurs.
+
+The proxy reads the fixed HTTPS Codex usage endpoint with its owned access token and account header. Redirects and bodies over 256 KiB are refused. The existing serialized credential-refresh lifecycle handles expired/rejected tokens, saves acquired rotations before runtime publication, and preserves exclusion. Provider reads honor the caller's cancellation; credential publication follows the service lifetime so a short caller deadline does not discard an acquired rotation. Late results from a retired, replaced or reauthorization-required credential owner are refused.
+
+Only reported 18,000-second and 604,800-second windows are normalized into safe quota percentages, observation time and reset time. Unsupported or absent windows are not invented. Submind persists successful normalized observations separately, retaining append-only history and reading the latest per account. This release does not add a scheduled collector or graph API.
