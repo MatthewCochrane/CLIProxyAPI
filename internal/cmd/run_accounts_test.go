@@ -211,33 +211,37 @@ func TestPrivateAccountMissingCommitEvidenceRemainsUncertain(t *testing.T) {
 }
 
 func TestPrivateAccountInventoryReconcilesRecordedCommitAfterBrowserReload(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	c := accountTestController(t, dir)
-	values, err := c.accounts()
-	if err != nil || c.load(values) != nil {
-		t.Fatal("private store unavailable")
-	}
-	op := strings.Repeat("a", 32)
-	account, err := c.service.CommitControlledAuthorization(context.Background(), "", op, 0, accountTestTokens("browser-reload"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt := &accountAttempt{ID: op, State: "commit_uncertain", Expires: time.Now().Add(time.Minute)}
-	if err := c.save(attempt); err != nil {
-		t.Fatal(err)
-	}
-	c.attempts[op] = attempt
-	response := accountRequest(c, "GET", "/v1/control/accounts", "")
-	if response.Code != 200 || attempt.State != "completed" || attempt.AccountID != publicAccountID(account) {
-		t.Fatal("inventory did not reconcile the positively recorded commit")
-	}
-	reloaded := accountTestController(t, dir)
-	response = accountRequest(reloaded, "GET", "/v1/control/account-authorizations/"+op, "")
-	if response.Code != 200 || !strings.Contains(response.Body.String(), `"state":"completed"`) {
-		t.Fatal("reconciled completion was not durable")
+	for _, path := range []string{"/v1/control/accounts", "/v1/control/accounts/observations"} {
+		t.Run(path, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			c := accountTestController(t, dir)
+			values, err := c.accounts()
+			if err != nil || c.load(values) != nil {
+				t.Fatal("private store unavailable")
+			}
+			op := strings.Repeat("a", 32)
+			account, err := c.service.CommitControlledAuthorization(context.Background(), "", op, 0, accountTestTokens("browser-reload"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt := &accountAttempt{ID: op, State: "commit_uncertain", Expires: time.Now().Add(time.Minute)}
+			if err := c.save(attempt); err != nil {
+				t.Fatal(err)
+			}
+			c.attempts[op] = attempt
+			response := accountRequest(c, "GET", path, "")
+			if response.Code != 200 || attempt.State != "completed" || attempt.AccountID != publicAccountID(account) {
+				t.Fatal("inventory did not reconcile the positively recorded commit")
+			}
+			reloaded := accountTestController(t, dir)
+			response = accountRequest(reloaded, "GET", "/v1/control/account-authorizations/"+op, "")
+			if response.Code != 200 || !strings.Contains(response.Body.String(), `"state":"completed"`) {
+				t.Fatal("reconciled completion was not durable")
+			}
+		})
 	}
 }
 

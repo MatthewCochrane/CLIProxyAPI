@@ -60,6 +60,7 @@ type accountController struct {
 	login          deviceLogin
 	attempts       map[string]*accountAttempt
 	loaded, closed bool
+	observer       *routingobs.Observer
 }
 
 func newAccountController(cfg *config.Config) *accountController {
@@ -255,7 +256,7 @@ func (c *accountController) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
-	if path == routingobs.ControlAccountsPath && r.Method == http.MethodGet {
+	if (path == routingobs.ControlAccountsPath || path == routingobs.ControlAccountsPath+"/observations") && r.Method == http.MethodGet {
 		// A browser reload may lose its transient operation handle. Reconcile only
 		// our recorded commits against positive credential evidence; missing
 		// evidence stays fenced without hiding unrelated inventory.
@@ -263,6 +264,10 @@ func (c *accountController) handle(w http.ResponseWriter, r *http.Request) {
 			if attempt.State == "committing" || attempt.State == "commit_uncertain" {
 				_ = c.reconcile(attempt, values)
 			}
+		}
+		if path == routingobs.ControlAccountsPath+"/observations" {
+			c.observeAccounts(w, values)
+			return
 		}
 		rows := make([]accountView, 0)
 		seen := make(map[string]bool)

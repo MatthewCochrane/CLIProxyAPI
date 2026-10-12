@@ -62,3 +62,22 @@ their behavior.
 Submind's `POOLED_CODEX_ACCOUNTS_ENABLED` and existing server-side control URL/token
 provide the UI gateway. Legacy credentials, enrollment and assignment are not
 prerequisites. No browser receives the private bearer or upstream tokens.
+
+## Named observations for consolidated account cards
+
+With the existing private account role enabled, `GET /v1/control/accounts/observations`
+adds a backward-compatible read endpoint. The original `/v1/control/accounts`
+inventory and account mutations retain their existing shapes. The new response
+contains generated/start timestamps and named rows with the original public
+account handle, allowlisted provider/plan, eligibility, cooldown, passive quota
+windows and request-attempt counters. Counters belong to current registration
+epochs; an untracked or replaced epoch is unknown rather than zero. Incomplete
+counter coverage makes the aggregate unknown. Account IDs, tokens, file paths and
+internal keyed observer handles are never projected.
+
+Plans are read only from an already-owned ID token whose account identity matches
+the credential. Unknown claims remain unknown. Subscription expiry is not a
+payment date. Quota freshness and reset timing are observations, not proof that
+an account can use every model. Reading this endpoint does not make an inference
+request, refresh a token or change membership. It retains the same literal
+loopback, independent control bearer and browser-origin/cookie rejection gates.

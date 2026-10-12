@@ -121,6 +121,7 @@ type Observer struct {
 	authSource            func() []*coreauth.Auth
 	authMembershipSource  func(string) (uint64, uint64, bool)
 	authMembershipsSource func() (uint64, []coreauth.AuthMembership)
+	startedAt             time.Time
 }
 
 type accountCounterKey struct {
@@ -133,6 +134,7 @@ func NewObserver(hmacKey []byte, maxAccounts int) *Observer {
 		maxAccounts = DefaultMaxAccounts
 	}
 	return &Observer{
+		startedAt:           time.Now().UTC(),
 		hmacKey:             append([]byte(nil), hmacKey...),
 		maxAccounts:         maxAccounts,
 		counters:            make(map[accountCounterKey]Counters, maxAccounts),
@@ -533,6 +535,47 @@ func (o *Observer) Snapshot(now time.Time) Snapshot {
 		snapshot.Health.Status = "ready"
 	}
 	return snapshot
+}
+
+// SnapshotAccount joins a detached authoritative auth to counters for exactly
+// that registration epoch. Raw auth IDs and keyed handles stay inside the proxy.
+// An untracked account or a concurrently replaced epoch is unknown, not zero.
+func (o *Observer) SnapshotAccount(auth *coreauth.Auth, now time.Time) *AccountSnapshot {
+	if o == nil || auth == nil || auth.ID == "" {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, membershipSource, membershipsSource := o.sources()
+	if membershipSource == nil || membershipsSource == nil {
+		return nil
+	}
+	generation, epoch, current := membershipSource(auth.ID)
+	if !current || epoch != auth.RegistrationEpoch {
+		return nil
+	}
+	if o.membershipGeneration != generation {
+		latestGeneration, memberships := membershipsSource()
+		o.rebuildMembershipCacheLocked(latestGeneration, memberships)
+		if latestGeneration != generation {
+			return nil
+		}
+	}
+	key := accountCounterKey{handle: o.accountHandle(auth.ID), registrationEpoch: epoch}
+	if _, tracked := o.selectedMemberships[key]; !tracked {
+		return nil
+	}
+	return &AccountSnapshot{
+		Eligibility: eligibility(sanitizedEligibility(auth, now), now),
+		Cooldown:    cooldown(auth, now), Quota: quota(auth.Quota, now), Counters: o.counters[key],
+	}
+}
+
+func (o *Observer) StartedAt() time.Time {
+	if o == nil {
+		return time.Time{}
+	}
+	return o.startedAt
 }
 
 func sanitizedEligibility(auth *coreauth.Auth, now time.Time) eligibilityState {

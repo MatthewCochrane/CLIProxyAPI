@@ -183,6 +183,7 @@ func newRoutingObservabilityRuntime(serviceConfig *config.Config) (*routingObser
 			}
 			if control.accounts {
 				runtime.accounts = newAccountController(serviceConfig)
+				runtime.accounts.observer = observer
 			}
 		}
 		runtime.controlListener, err = net.Listen("tcp", control.addr)
